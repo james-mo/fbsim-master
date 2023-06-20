@@ -1,5 +1,5 @@
-import { Player } from './person';
-import { City } from './place';
+import { Player } from "./person";
+import { City } from "./place";
 
 export class Club {
   private _name: string;

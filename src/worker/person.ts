@@ -1,5 +1,5 @@
-import { Country, City } from './place';
-import { DateTime } from 'luxon';
+import { Country, City } from "./place";
+import { DateTime } from "luxon";
 
 class Person {
   _name: string;
@@ -28,8 +28,8 @@ class Person {
   calculate_age(now: DateTime) {
     // calculate age (years and days)
     console.log(now);
-    const diff = now.diff(this._dob, ['years', 'days']);
-    return diff.years + ' years, ' + diff.days + ' days';
+    const diff = now.diff(this._dob, ["years", "days"]);
+    return diff.years + " years, " + diff.days + " days";
   }
 
   set nationalities(nationalities: Country[]) {
@@ -66,53 +66,53 @@ class Person {
 }
 
 export type OutfieldAttribute =
-  | 'pace'
-  | 'acceleration'
-  | 'agility'
-  | 'aggression'
-  | 'balance'
-  | 'dribbling'
-  | 'technique'
-  | 'finishing'
-  | 'passing'
-  | 'vision'
-  | 'tackling'
-  | 'heading'
-  | 'strength'
-  | 'stamina'
-  | 'positioning'
-  | 'movement'
-  | 'decisions'
-  | 'flair'
-  | 'natural_fitness'
-  | 'work_rate'
-  | 'determination'
-  | 'leadership'
-  | 'teamwork'
-  | 'jumping'
-  | 'reactions';
+  | "pace"
+  | "acceleration"
+  | "agility"
+  | "aggression"
+  | "balance"
+  | "dribbling"
+  | "technique"
+  | "finishing"
+  | "passing"
+  | "vision"
+  | "tackling"
+  | "heading"
+  | "strength"
+  | "stamina"
+  | "positioning"
+  | "movement"
+  | "decisions"
+  | "flair"
+  | "natural_fitness"
+  | "work_rate"
+  | "determination"
+  | "leadership"
+  | "teamwork"
+  | "jumping"
+  | "reactions";
 
 export type GoalkeeperAttributes =
-  | 'handling'
-  | 'reactions'
-  | 'one_on_ones'
-  | 'rushing_out'
-  | 'communication'
-  | 'eccentricity'
-  | 'throwing'
-  | 'kicking'
-  | 'vision'
-  | 'positioning'
-  | 'pace'
-  | 'acceleration'
-  | 'strength'
-  | 'jumping'
-  | 'stamina'
-  | 'natural_fitness'
-  | 'determination'
-  | 'work_rate'
-  | 'leadership'
-  | 'teamwork';
+  | "handling"
+  | "reactions"
+  | "one_on_ones"
+  | "rushing_out"
+  | "communication"
+  | "eccentricity"
+  | "throwing"
+  | "kicking"
+  | "vision"
+  | "positioning"
+  | "pace"
+  | "acceleration"
+  | "strength"
+  | "jumping"
+  | "stamina"
+  | "natural_fitness"
+  | "determination"
+  | "work_rate"
+  | "leadership"
+  | "teamwork";
 
 export type Attribute = {
   name: string;
@@ -141,7 +141,6 @@ export class Attributes {
   set_attr(name: string, value: number) {
     this._attributes.set(name, value);
   }
-
 }
 
 export class Player extends Person {
@@ -156,13 +155,12 @@ export class Player extends Person {
     return this._attributes;
   }
 
-  get_attribute(name: string):number {
-
+  get_attribute(name: string): number {
     let attr = this._attributes.get_attr(name);
 
-    if(typeof attr === 'number') {
+    if (typeof attr === "number") {
       return attr;
-    };
+    }
     return 0;
   }
 
@@ -279,7 +277,9 @@ export class Instruction {
     return this._description;
   }
 
-  set instruction(instruction: PlayerInstruction | TeamInstruction | GoalkeeperInstruction) {
+  set instruction(
+    instruction: PlayerInstruction | TeamInstruction | GoalkeeperInstruction
+  ) {
     this._instruction = instruction;
   }
 
@@ -289,47 +289,51 @@ export class Instruction {
 }
 
 export type TeamInstruction =
-  | 'play_out_from_back'
-  | 'play_through_the_middle'
-  | 'play_down_the_wings'
-  | 'play_long_balls'
-  | 'play_counter_attacks'
-  | 'defend_deep'
-  | 'defend_medium'
-  | 'defend_high'
-  | 'offside_trap'
-  | 'cross_often'
-  | 'work_ball_into_box'
-  | 'shoot_from_distance'
-  | 'wait_for_good_shot'
-  | 'pass_very_short'
-  | 'pass_short'
-  | 'pass_medium'
-  | 'pass_long'
-  | 'play_through_balls'
-  | 'play_lobs'
-  | 'play_one_twos';
+  | "play_out_from_back"
+  | "play_through_the_middle"
+  | "play_down_the_wings"
+  | "play_long_balls"
+  | "play_counter_attacks"
+  | "defend_deep"
+  | "defend_medium"
+  | "defend_high"
+  | "offside_trap"
+  | "cross_often"
+  | "work_ball_into_box"
+  | "shoot_from_distance"
+  | "wait_for_good_shot"
+  | "pass_very_short"
+  | "pass_short"
+  | "pass_medium"
+  | "pass_long"
+  | "play_through_balls"
+  | "play_lobs"
+  | "play_one_twos";
 
 export type PlayerInstruction =
-  | 'tackle_harder'
-  | 'mark_tightly'
-  | 'stay_on_feet'
-  | 'shorter_passes'
-  | 'get_in_behind'
-  | 'dribble_less'
-  | 'dribble_more'
-  | 'cross_less'
-  | 'cross_more'
-  | 'shoot_less'
-  | 'shoot_more'
-  | 'pass_to_space'
-  | 'pass_to_feet'
-  | 'try_risky_passes'
-  | 'play_safe_passes'
-  | 'hold_up_ball'
-  | 'move_into_channels'
-  | 'get_further_forward'
-  | 'run_wide_with_ball'
-  | 'cross_from_byline';
+  | "tackle_harder"
+  | "mark_tightly"
+  | "stay_on_feet"
+  | "shorter_passes"
+  | "get_in_behind"
+  | "dribble_less"
+  | "dribble_more"
+  | "cross_less"
+  | "cross_more"
+  | "shoot_less"
+  | "shoot_more"
+  | "pass_to_space"
+  | "pass_to_feet"
+  | "try_risky_passes"
+  | "play_safe_passes"
+  | "hold_up_ball"
+  | "move_into_channels"
+  | "get_further_forward"
+  | "run_wide_with_ball"
+  | "cross_from_byline";
 
-export type GoalkeeperInstruction = 'dribble_more' | 'take_more_risks' | 'rush_out' | 'use_creative_freedom';
+export type GoalkeeperInstruction =
+  | "dribble_more"
+  | "take_more_risks"
+  | "rush_out"
+  | "use_creative_freedom";

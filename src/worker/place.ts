@@ -1,5 +1,5 @@
 export { Country, City, Venue, PitchDimensions };
-import { Coords, Rectangle } from '../common/types';
+import { Coords, Rectangle } from "../common/types";
 
 class Place {
   _name: string;

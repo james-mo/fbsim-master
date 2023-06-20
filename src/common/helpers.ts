@@ -1,4 +1,4 @@
-import { Coords, Rectangle } from './types';
+import { Coords, Rectangle } from "./types";
 
 export function insideRectangle(rect: Rectangle, point: Coords) {
   return (
@@ -11,7 +11,11 @@ export function insideRectangle(rect: Rectangle, point: Coords) {
   );
 }
 
-export function meters_to_px(meters: number, venue_length: number, length: number) {
+export function meters_to_px(
+  meters: number,
+  venue_length: number,
+  length: number
+) {
   return (meters / venue_length) * length;
 }
 
