@@ -16,5 +16,5 @@ export function meters_to_px(meters: number, venue_length: number, length: numbe
 }
 
 export function dist(a: Coords, b: Coords) {
-  return Math.sqrt(Math.pow(a.x - b.x, 2) + Math.pow(a.y - b.y, 2));
+  return Math.abs(Math.sqrt(Math.pow(a.x - b.x, 2) + Math.pow(a.y - b.y, 2)));
 }

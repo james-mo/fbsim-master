@@ -1,0 +1,10 @@
+canvas {
+    position: absolute;
+
+}
+
+#clock {
+    position: relative;
+    top: 650px;
+    left: 10px;
+}

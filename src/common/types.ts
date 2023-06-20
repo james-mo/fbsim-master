@@ -161,7 +161,8 @@ export class PitchArea {
   }
 
   // goalkeeper area : from the goal line to ten meters out
-  GOALKEEPER_AREA = new PitchArea(0, this.venue.width / 2 + PitchDimensions.six_yard_box_width / 2 + 4, PitchDimensions.six_yard_box_length + 4, this.venue.width / 2 - PitchDimensions.six_yard_box_width / 2 - 4);
+  /*GOALKEEPER_AREA = new PitchArea(
+    {x: 0, this.venue.width / 2 + PitchDimensions.six_yard_box_width / 2 + 4, PitchDimensions.six_yard_box_length + 4, this.venue.width / 2 - PitchDimensions.six_yard_box_width / 2 - 4);
   // left back area : from the corner flag to the six yard box up to 3/4 of the half
   LB_AREA = new PitchArea(0, 0, PitchDimensions.six_yard_box_width, (this.venue.length / 2) * 3/4);
   // right back area : from the corner flag to the six yard box up to 3/4 of the half
@@ -171,7 +172,7 @@ export class PitchArea {
   // defensive mid area: from the box to 3/4 of the half and 15m on either side of the center line
   DM_AREA = new PitchArea(PitchDimensions.penalty_area_length, this.venue.width / 2 + 15, (this.venue.length/2) * 3/4, (this.venue.width / 2) - 15);
   // left center mid area: from 5m inside the touchline to the center line and from a little outside the box to the center circle
-  LCM_AREA = new PitchArea(PitchDimensions.penalty_area_length+5, 5, this.venue.length / 2, PitchDimensions.penalty_area_width / 2 + 3);
+  LCM_AREA = new PitchArea(PitchDimensions.penalty_area_length+5, 5, this.venue.length / 2, PitchDimensions.penalty_area_width / 2 + 3);*/
 
 }
 

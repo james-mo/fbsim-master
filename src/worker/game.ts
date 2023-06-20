@@ -1,6 +1,6 @@
 import { Club } from './club';
-import { Player, Position, Role, Instruction } from './person';
-import { Venue } from './place';
+import { Player, Position, Role, Instruction, TeamInstruction, PlayerInstruction } from './person';
+import { PitchDimensions, Venue } from './place';
 import { Coords, Polygon } from '../common/types';
 import { DateTime } from 'luxon';
 import { draw_pitch } from './index';
@@ -9,7 +9,7 @@ import { dist } from '../common/helpers';
 export class PlayerOnPitch extends Player {
   _role: Role;
   _position: Position;
-  _instructions: Instruction[];
+  _instructions: PlayerInstruction[];
   _loc: Coords;
   _dx: number;
   _dy: number;
@@ -31,8 +31,12 @@ export class PlayerOnPitch extends Player {
     return this._position;
   }
 
-  set instructions(instructions: Instruction[]) {
+  set instructions(instructions: PlayerInstruction[]) {
     this._instructions = instructions;
+  }
+
+  get instructions() {
+    return this._instructions;
   }
 
   set loc(loc: Coords) {
@@ -63,6 +67,10 @@ export class PlayerOnPitch extends Player {
     this._dz = dz;
   }
 
+  get dz() {
+    return this._dz;
+  }
+
   calculate_optimal_position(teamInPossession: Team) {
     return 0;
   }
@@ -79,10 +87,99 @@ export class PlayerOnPitch extends Player {
     this.loc.x += this.dx;
     this.loc.y += this.dy;
     this.loc.z += this.dz;
+
+    console.log(this.dx, this.dy, this.dz);
+    if (this.dx == 0
+    && this.dy == 0
+    && this.dz == 0) {
+      console.log('here');
+      this.passive_movement();
+    }
   }
 
   pass(team:Team, opp:Team) {
-    this.choose_pass_target(team,opp);
+    let target = this.choose_pass_target(team,opp);
+    // passing accuracy
+    let pass_accuracy = this.attributes.get_attr('passing');
+    if (pass_accuracy == undefined) {
+      pass_accuracy = 25;
+    }
+    // distance to target
+    let d = dist(this.loc, target.loc);
+    let target_coords:Coords = {
+      x: target.loc.x,
+      y: target.loc.y,
+      z: target.loc.z
+    };
+    // choose whether to lob or pass on ground
+    let lob = false;
+    if (d > 20) {
+      // lob
+      lob = true;
+    }
+
+    let cross = false;
+    // if passer in crossing zone and target in box, cross
+    let direction = team.attacking_direction;
+    if (direction == 'left') {
+      if (this.loc.x < 20
+        && (this.loc.y < this.venue.width / 2 +
+            PitchDimensions.penalty_area_width / 2)
+        || (this.loc.y > this.venue.width / 2 -
+            PitchDimensions.penalty_area_width / 2)) {
+        // if target in box
+        if (target.loc.x < 11 &&
+            target.loc.y > this.venue.width / 2 -
+            PitchDimensions.penalty_area_width / 3
+            && target.loc.y < this.venue.width / 2 +
+            PitchDimensions.penalty_area_width / 3) {
+          cross = true;
+        
+        }
+      }
+    }
+    else if (direction == 'right') {
+      if (this.loc.x > this.venue.length - 20
+        && (this.loc.y < this.venue.width / 2 +
+          PitchDimensions.penalty_area_width / 2)
+        || (this.loc.y > this.venue.width / 2 -
+          PitchDimensions.penalty_area_width / 2)) {
+        // if target in box
+        if (target.loc.x > this.venue.length - 11 &&
+          target.loc.y > this.venue.width / 2 -
+          PitchDimensions.penalty_area_width / 3
+          && target.loc.y < this.venue.width / 2 +
+          PitchDimensions.penalty_area_width / 3) {
+          cross = true;
+        }
+      }
+    }
+
+
+
+    //calculate accuracy
+    //apply error to target_coords based on passing accuracy and distance
+    let error = 100 - pass_accuracy * d / 100;
+    target_coords.x += Math.random() * error / 4;
+    target_coords.y += Math.random() * error / 4;
+    if (target_coords.z > 0) {
+      target_coords.z += Math.random() * error / 4;
+    }
+    
+    // caluclate speed to apply to ball
+    // better passing and technique means faster pass
+    // max speed = 25 m/s
+    let technique = this.attributes.get_attr('technique');
+    if (technique == undefined) {
+      technique = 25;
+    }
+    let speed = 25 * (pass_accuracy / 100) * technique / 100;
+    // calculate dx, dy, dz
+    let dx = (target_coords.x - this.loc.x) / d * speed;
+    let dy = (target_coords.y - this.loc.y) / d * speed;
+    if (lob || cross) {
+      let dz = (target_coords.z - this.loc.z) / d * speed;
+    }
   }
 
   choose_pass_target(team:Team, opp:Team) {
@@ -97,19 +194,77 @@ export class PlayerOnPitch extends Player {
     for (let p of players) {
       let d = dist(this.loc, p.loc);
       // normal distribution by distance
-      scores[players.indexOf(p)] += 1 / (d * d);
+      // if team instruction is shorter passing, reduce the standard deviation
+      // if team instruction is longer passing, increase the standard deviation
+      // if player instruction is shorter passing, reduce the standard deviation
+      // if player instruction is longer passing, increase the standard deviation
+
+      let std_dev = 1;
+      if (team.tactics.includes('shorter_passing' as TeamInstruction)) {
+        // reduce standard deviation
+        std_dev = 0.8;
+      }
+
+      if (team.tactics.includes('longer_passing' as TeamInstruction)) {
+        // increase standard deviation
+        std_dev = 1.2;
+      }
+
+      if (this.instructions.includes('shorter_passing' as PlayerInstruction)) {
+        std_dev = std_dev - 0.15;
+      }
+
+      if (this.instructions.includes('longer_passing' as PlayerInstruction)) {
+        std_dev = std_dev + 0.15;
+      }
+      scores[players.indexOf(p)] += Math.exp(-0.5 * (d * d) / (std_dev * std_dev));
+
       // players that the passer is currently facing have a higher chance of being passed to
       let angle = Math.atan2(p.loc.y - this.loc.y, p.loc.x - this.loc.x);
       let facing = Math.atan2(this.dy, this.dx);
       let diff = Math.abs(angle - facing);
       if (diff < Math.PI / 4) {
+        console.log(diff);
         scores[players.indexOf(p)] += 1;
       }
       // players under pressure have a lower chance of being passed to
       let pressure = p.calculate_pressure(opp);
       scores[players.indexOf(p)] -= pressure;
+      console.log(scores);
       // players in a threatening position have a higher chance of being passed to
+      let threat = p.calculate_threat(team);
+      scores[players.indexOf(p)] += threat;
+
+      // sort scores
+      scores.sort((a, b) => {
+        return b - a;
+      });
+      
+
+      
     }
+
+    console.log(scores);
+
+    // randomly choose player
+      // use decision making attribute
+      // use team tactics
+      // use player instructions
+
+    let decisions = this.attributes.get_attr('decisions');
+    if(decisions==undefined){
+      decisions=25;
+    }
+    console.log(decisions);
+      // lower decisions means more deviatione
+      // maximum randomness = 0.5
+      // minimum randomness = 0.1
+    let randomness = 0.5 - (decisions / 100) * 0.4;
+    let index = Math.floor(Math.random() * randomness * 10);
+    console.log(index);
+    let target = players[index];
+    console.log(target);
+    return target;
   }
 
   calculate_pressure(opp:Team) {
@@ -118,10 +273,41 @@ export class PlayerOnPitch extends Player {
     opponents.forEach((player) => {
       let d = dist(this.loc, player.loc);
       if (d < 10) {
-        pressure += 1;
+        pressure += 1 / (d * d);
       }
     });
     return pressure;
+  }
+  
+  passive_movement() {
+    // "brownian motion" for players
+    // randomly move around in small radius around current location
+
+    console.log('here');
+
+    let radius = 0.05;
+    let x = this.loc.x + (Math.random() - 0.5) * radius;
+    let y = this.loc.y + (Math.random() - 0.5) * radius;
+
+    // check if new location is within pitch
+    if (x < 0) {
+      x = 0;
+    }
+    if (x > this.venue.length) {
+      x = this.venue.length;
+    }
+    if (y < 0) {
+      y = 0;
+    }
+    if (y > this.venue.width) {
+      y = this.venue.width;
+    }
+
+    this.loc = {
+      x: x,
+      y: y,
+      z: this.loc.z,
+    };
   }
 
   calculate_threat(team:Team) {
@@ -132,10 +318,23 @@ export class PlayerOnPitch extends Player {
       y: this.venue.width / 2,
       z: 0,
     }
-    if (direction == 0) {
+    let right:Coords = {
+      x: this.venue.length,
+      y: this.venue.width / 2,
+      z: 0,
+    }
+
+    if (direction == "left") {
+      //left side goal
+      let d = dist(this.loc, left);
+      return 1 / (d * d);
+    } else {
+      //right side goal
+      let d = dist(this.loc, right);
+      return 1 / (d * d);
 
     }
-    let d = dist(this.loc, team.
+   
   }
 
   initialize() {
@@ -149,18 +348,22 @@ export class PlayerOnPitch extends Player {
 
     this.dx = 0;
     this.dy = 0;
+    this.dz = 0;
 
+    this.instructions = [];
   }
 }
 
 export class Team extends Club {
   _playersOnPitch: PlayerOnPitch[];
   _substitutes: Player[];
-  // 1 = right, 0 = left
-  _attacking_direction: 0|1;
+  _attacking_direction: "left"|"right";
+
+  tactics:TeamInstruction[];
 
   constructor(name: string) {
     super(name);
+    this.tactics = [];
   }
 
   set playersOnPitch(players: PlayerOnPitch[]) {
@@ -175,12 +378,25 @@ export class Team extends Club {
     this._substitutes = substitutes;
   }
 
-  set attacking_direction(direction: 0|1) {
+  set attacking_direction(direction: "left"|"right") {
     this._attacking_direction = direction;
   }
 
   get attacking_direction() {
     return this._attacking_direction;
+  }
+
+  add_instruction(instruction: TeamInstruction) {
+    this.tactics.push(instruction);
+  }
+
+  remove_instruction(instruction: TeamInstruction) {
+    let index = this.tactics.indexOf(instruction);
+    this.tactics.splice(index, 1);
+  }
+
+  get instructions() {
+    return this.tactics;
   }
 
 }
@@ -202,6 +418,7 @@ export class Match {
   possible_penalties: boolean;
   is_penalties: boolean;
   possession: Team;
+  outOfPossession: Team;
   player_possession: PlayerOnPitch | null;
   ticks: number;
   team_kicked_off_first: Team;
@@ -292,11 +509,11 @@ export class Match {
 
     let rand = Math.random();
     if (rand < 0.5) {
-      this.home.attacking_direction = 1;
-      this.away.attacking_direction = 0;
+      this.home.attacking_direction = "right";
+      this.away.attacking_direction = "left";
     } else {
-      this.home.attacking_direction = 0;
-      this.away.attacking_direction = 1;
+      this.home.attacking_direction = "left";
+      this.away.attacking_direction = "right";
     }
 
     this.half = 1;
@@ -326,7 +543,11 @@ export class Match {
     }
 
     this.home.playersOnPitch.forEach((player) => {
-      
+      player.venue = this.venue;
+    });
+
+    this.away.playersOnPitch.forEach((player) => {
+      player.venue = this.venue;
     });
 
 
@@ -402,6 +623,9 @@ export class Match {
     this.home.playersOnPitch.forEach((player) => {
       player.move();
     });
+    this.away.playersOnPitch.forEach((player) => {
+      player.move();
+    });
   }
 
   draw_agents() {
@@ -429,12 +653,12 @@ export class Match {
 
           ctx.fillStyle = "black";
           ctx.beginPath();
-          ctx.arc(x, y, 5, 0, 2 * Math.PI);
+          ctx.arc(x, y, 3.4, 0, 2 * Math.PI);
           ctx.fill();
           
           ctx.fillStyle = "white";
           ctx.beginPath();
-          ctx.arc(x, y, 4, 0, 2 * Math.PI);
+          ctx.arc(x, y, 2.4, 0, 2 * Math.PI);
           ctx.fill();
         }
       }
@@ -453,12 +677,12 @@ export class Match {
         if (ctx) {
           ctx.fillStyle = "black";
           ctx.beginPath();
-          ctx.arc(x, y, 7, 0, 2 * Math.PI);
+          ctx.arc(x, y, 4.4, 0, 2 * Math.PI);
           ctx.fill();
           
           ctx.fillStyle = "white";
           ctx.beginPath();
-          ctx.arc(x, y, 6, 0, 2 * Math.PI);
+          ctx.arc(x, y, 3.4, 0, 2 * Math.PI);
           ctx.fill();
         }
       });
@@ -468,12 +692,12 @@ export class Match {
         if (ctx) {
           ctx.fillStyle = "white";
           ctx.beginPath();
-          ctx.arc(x, y, 7, 0, 2 * Math.PI);
+          ctx.arc(x, y, 5, 0, 2 * Math.PI);
           ctx.fill();
           
           ctx.fillStyle = "black";
           ctx.beginPath();
-          ctx.arc(x, y, 6, 0, 2 * Math.PI);
+          ctx.arc(x, y, 4, 0, 2 * Math.PI);
           ctx.fill();
         }
       });
@@ -501,10 +725,10 @@ export class Match {
 
 
   getKickoffPlayer(team: Team) {
-    const players = team.playersOnPitch;
+    let players = team.playersOnPitch;
 
     // if team has striker
-    players.filter((player) => {
+    players = players.filter((player) => {
       return player.position.abbreviation == 'ST';
     });
     if (players.length > 0) {
@@ -599,28 +823,34 @@ export class Match {
     }
   }
 
+  setPossession(team:Team) {
+    this.possession = team;
+    this.outOfPossession = team == this.home ? this.away : this.home;
+  }
+
   do_kickoff(half:boolean) {
     const rand = Math.random();
     if (!half) {
       if (rand < 0.5) {
-        this.possession = this.home;
+        this.setPossession(this.home)
         this.team_kicked_off_first = this.home;
       } else {
-        this.possession = this.away;
+        this.setPossession(this.away)
         this.team_kicked_off_first = this.away;
       }
     }
     else {
       if (this.team_kicked_off_first == this.home) {
-        this.possession = this.away;
+        this.setPossession(this.away);
+
       }
       else {
-        this.possession = this.home;
+        this.setPossession(this.home);
       }
     }
     const p1 = this.getKickoffPlayer(this.possession);
     this.player_possession = p1;
-    this.player_possession.pass();
+    this.player_possession.pass(this.possession, this.outOfPossession);
   }
 
   async play() {

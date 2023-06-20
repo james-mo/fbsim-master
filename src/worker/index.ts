@@ -52,6 +52,7 @@ for (let i = 0; i < 22; i++) {
   }
 }
 
+console.log(players1);
 team1.playersOnPitch = players1;
 team2.playersOnPitch = players2;
 
@@ -70,14 +71,14 @@ for (let i = 0; i < 22; i++) {
   if (p1.position.name === 'Goalkeeper') {
     is_gk = true;
   }
-  if (!is_gk) {
-    for ( let a in gk_attribute_names ) {
-      p1.attributes.set_attr(a, Math.floor(Math.random()*100)+1);
+  if (is_gk) {
+    for ( let a = 0; a < gk_attribute_names.length; a++ ) {
+      p1.attributes.set_attr(gk_attribute_names[a], Math.floor(Math.random()*100)+1);
     }
   }
   else {
-    for ( let a in attribute_names ) {
-      p1.attributes.set_attr(a, Math.floor(Math.random()*100)+1);
+    for ( let a = 0; a < attribute_names.length; a++ ) {
+      p1.attributes.set_attr(attribute_names[a], Math.floor(Math.random()*100)+1);
     }
   }
 }

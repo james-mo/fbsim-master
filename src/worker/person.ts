@@ -120,13 +120,13 @@ export type Attribute = {
 };
 
 export class Attributes {
-  _attributes: Attribute[];
+  _attributes: Map<string, number>;
 
   constructor() {
-    this._attributes = [];
+    this._attributes = new Map<string, number>();
   }
 
-  set attributes(attributes: Attribute[]) {
+  set attributes(attributes: Map<string, number>) {
     this._attributes = attributes;
   }
 
@@ -135,11 +135,11 @@ export class Attributes {
   }
 
   get_attr(name: string) {
-    return this._attributes[name];
+    return this._attributes.get(name);
   }
 
   set_attr(name: string, value: number) {
-    this._attributes.push({ name, value });
+    this._attributes.set(name, value);
   }
 
 }
@@ -156,8 +156,14 @@ export class Player extends Person {
     return this._attributes;
   }
 
-  get_attribute(name: string) {
-    return this._attributes.get_attr(name);
+  get_attribute(name: string):number {
+
+    let attr = this._attributes.get_attr(name);
+
+    if(typeof attr === 'number') {
+      return attr;
+    };
+    return 0;
   }
 
   set positions(positions: Position[]) {
@@ -282,7 +288,7 @@ export class Instruction {
   }
 }
 
-type TeamInstruction =
+export type TeamInstruction =
   | 'play_out_from_back'
   | 'play_through_the_middle'
   | 'play_down_the_wings'
@@ -304,7 +310,7 @@ type TeamInstruction =
   | 'play_lobs'
   | 'play_one_twos';
 
-type PlayerInstruction =
+export type PlayerInstruction =
   | 'tackle_harder'
   | 'mark_tightly'
   | 'stay_on_feet'
@@ -326,4 +332,4 @@ type PlayerInstruction =
   | 'run_wide_with_ball'
   | 'cross_from_byline';
 
-type GoalkeeperInstruction = 'dribble_more' | 'take_more_risks' | 'rush_out' | 'use_creative_freedom';
+export type GoalkeeperInstruction = 'dribble_more' | 'take_more_risks' | 'rush_out' | 'use_creative_freedom';
