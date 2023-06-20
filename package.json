@@ -5,7 +5,8 @@
   "scripts": {
     "build": "tsc",
     "start": "node ./dist/app.js",
-    "dev": "ts-node ./src/index.ts"
+    "dev": "ts-node ./src/index.ts",
+    "pretty": "yarn prettier --write ."
   },
   "dependencies": {
     "@types/express": "^4.17.17",
@@ -22,6 +23,7 @@
     "fancy-log": "^2.0.0",
     "gulp": "^4.0.2",
     "gulp-typescript": "^6.0.0-alpha.1",
+    "prettier": "2.8.8",
     "ts-node": "^10.9.1",
     "tsify": "^5.0.4",
     "vinyl-source-stream": "^2.0.0",

@@ -866,7 +866,7 @@ export class Match {
       this.tick();
       if (DateTime.now().diff(now).milliseconds < 1000 / 60) {
         await new Promise((resolve) =>
-            setTimeout(resolve, 1000 / 60 - DateTime.now().diff(now).milliseconds)
+          setTimeout(resolve, 1000 / 60 - DateTime.now().diff(now).milliseconds)
         );
       }
     }

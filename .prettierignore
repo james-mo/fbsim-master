@@ -1,3 +1,11 @@
 node_modules/
 dist/
 dist/**/*
+.yarn/
+.vscode/
+.git/
+package.json
+README.md
+yarn.lock
+.gitignore
+.yarnrc.yml
