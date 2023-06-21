@@ -11,7 +11,34 @@ import { PitchDimensions, Venue } from "./place";
 import { Coords, PitchArea, Polygon } from "../common/types";
 import { DateTime } from "luxon";
 import { draw_pitch } from "./index";
-import { dist } from "../common/helpers";
+import { dist, in_range, meters_to_px, rand_in_range } from "../common/helpers";
+
+type PlayerStats = {
+  goals: number;
+  assists: number;
+  passes_attempted: number;
+  passes_completed: number;
+  shots: number;
+  shots_on_target: number;
+  tackles_attempted: number;
+  tackles_completed: number;
+  interceptions: number;
+  fouls: number;
+  fouls_suffered: number;
+  yellow_cards: number;
+  red_cards: number;
+  saves: number;
+  goals_conceded: number;
+  clean_sheets: number;
+  penalties_scored: number;
+  penalties_missed: number;
+  penalties_saved: number;
+  own_goals: number;
+  minutes_played: number;
+  xG: number;
+  xA: number;
+};
+
 
 export class PlayerOnPitch extends Player {
   _role: Role;
@@ -22,11 +49,15 @@ export class PlayerOnPitch extends Player {
   _dy: number;
   _dz: number;
   venue: Venue;
+  team:Team;
+  receive_pass: boolean;
 
   target_speed: number;
-  target_loc: Polygon;
+  target_loc: Coords;
 
   defensive_area: PitchArea;
+
+  m:Match;
 
   set role(role: Role) {
     this._role = role;
@@ -80,16 +111,198 @@ export class PlayerOnPitch extends Player {
     return this._dz;
   }
 
-  calculate_optimal_position(teamInPossession: Team) {
-    return 0;
+  calculate_optimal_position(teamInPossession: Team|null) {
+    if (this.team == teamInPossession) {
+      // move towards more threatening positions
+      // or provide passing options
+
+    }
   }
 
   kickoff_position() {
     return 0;
   }
 
-  decide_action() {
-    return 0;
+  dribble() {
+    let dribbling = this.attributes.get_attr("dribbling");
+    if (dribbling == undefined) {
+      dribbling = 25;
+    }
+
+    let target = this.calculate_optimal_position(this.team);
+    this.dx = 0;
+    this.dy = 0;
+  }
+
+  decelerate() {
+    // deceleration = 0.5 * acceleration
+    let acceleration = this.attributes.get_attr("acceleration");
+    if (acceleration == undefined) {
+      acceleration = 25;
+    }
+
+    let max_deceleration = 6 + (acceleration / 100) * 2;
+
+    let deceleration = max_deceleration / 2;
+
+    if (this.dx > 0 ) {
+      this.dx -= deceleration / 60;
+      if (this.dx < 0) {
+        this.dx = 0;
+      }
+    }
+    if (this.dx < 0) {
+      this.dx += deceleration / 60;
+      if (this.dx > 0) {
+        this.dx = 0;
+      }
+    }
+    if (this.dy > 0) {
+      this.dy -= deceleration / 60;
+      if (this.dy < 0) {
+        this.dy = 0;
+      }
+    }
+    if (this.dy < 0) {
+      this.dy += deceleration / 60;
+      if (this.dy > 0) {
+        this.dy = 0;
+      }
+
+    }
+
+
+  }
+
+  decide_action(m:Match) {
+    // if ball is not possessed by anyone, and player is closest 
+    // teammate, try to get it
+    if (m.possession == null) {
+      let closest = m.closest_to_ball();
+      if (closest.includes(this)) {
+        this.get_ball(m);
+      } else {
+        this.decelerate();
+        console.log("decelerating");
+      }
+    } else {
+      // if ball is possessed by self
+      if (m.player_possession == this) {
+        // dribble, pass, or shoot
+        // calculate teammate threat
+        let teammate_threat = new Array(this.team.playersOnPitch.length-1).fill(0);
+        for (let p of this.team.playersOnPitch.filter((player) => {
+          return player != this;
+        })) {
+          let threat = p.calculate_threat(this.team);
+          teammate_threat[this.team.playersOnPitch.indexOf(p)] = threat;
+        }
+
+        let self_threat = this.calculate_threat(this.team);
+        let max_threat = Math.max(...teammate_threat);
+        if (max_threat > self_threat) {
+          // pass
+          this.pass(this.team, m.outOfPossession as Team);
+        } else {
+          // dribble
+          this.dribble();
+        }
+
+      }
+
+      else {
+        // if ball is possessed by teammate
+        // move to random position in attacking third
+
+        this.target_loc.x += rand_in_range(-3,3);
+
+    
+        this.target_loc.y += rand_in_range(-3,3);
+
+        this.move_to(this.target_loc,'max');
+      }
+        
+        
+
+
+
+    }
+  }
+
+  calculate_closest_teammate(m: Match) {
+
+  }
+
+  get_ball(m:Match) {
+    let target = m.ball_pos;
+    this.move_to(target,'max');
+  }
+
+  move_to(target: Coords, speed: "max" | "high" | "medium" | "slow") {
+
+    // calculate dx, dy, dz
+    let pace = this.attributes.get_attr("pace");
+    if (pace == undefined) {
+      pace = 25;
+    }
+    // max speed of 100 pace player = 10 m/s
+    // max speed of 0 pace player = 7 m/s
+    let max_speed = 7 + (pace / 100) * 3;
+    let acceleration = this.attributes.get_attr("acceleration");
+    if (acceleration == undefined) {
+      acceleration = 25;
+    }
+    if (speed == "high") {
+      max_speed *= 0.85;
+    }
+    if (speed == "medium") {
+      max_speed *= 0.7;
+    }
+    if (speed == "slow") {
+      max_speed *= 0.5;
+    }
+    // max acceleration of 100 acceleration player = 8 m/s/s
+    // max acceleration of 0 acceleration player = 6 m/s/s
+    let max_acceleration = 6 + (acceleration / 100) * 2;
+    if (speed == "high") {
+      max_acceleration *= 0.85;
+    }
+    if (speed == "medium") {
+      max_acceleration *= 0.7;
+    }
+    if (speed == "slow") {
+      max_acceleration *= 0.5;
+    }
+
+    //calculate target dx and dy
+    // i.e. vectorize max_speed
+    let dx = ((target.x - this.loc.x) / dist(this.loc, target)) * max_speed;
+    let dy = ((target.y - this.loc.y) / dist(this.loc, target)) * max_speed;
+
+    dx /= 60;
+    dy /= 60;
+
+    if (dx > this.dx) {
+      this.dx += max_acceleration / 360;
+    } else if (dx < this.dx) {
+      this.dx -= max_acceleration / 360;
+    }
+    if (dy > this.dy) {
+      this.dy += max_acceleration / 360;
+    } else if (dy < this.dy) {
+      this.dy -= max_acceleration / 360;
+    }
+
+    
+
+
+  }
+
+  attempt_pass(dx, dy, dz) {
+    this.m.ball_dx = dx;
+    this.m.ball_dy = dy;
+    this.m.ball_dz = dz;
+    this.m.record("passes_attempted", this);
   }
 
   move() {
@@ -97,15 +310,14 @@ export class PlayerOnPitch extends Player {
     this.loc.y += this.dy;
     this.loc.z += this.dz;
 
-    console.log(this.dx, this.dy, this.dz);
     if (this.dx == 0 && this.dy == 0 && this.dz == 0) {
-      console.log("here");
       this.passive_movement();
     }
   }
 
   pass(team: Team, opp: Team) {
     let target = this.choose_pass_target(team, opp);
+    target.receive_pass = true;
     // passing accuracy
     let pass_accuracy = this.attributes.get_attr("passing");
     if (pass_accuracy == undefined) {
@@ -170,27 +382,47 @@ export class PlayerOnPitch extends Player {
 
     //calculate accuracy
     //apply error to target_coords based on passing accuracy and distance
-    let error = 100 - (pass_accuracy * d) / 100;
-    target_coords.x += (Math.random() * error) / 4;
-    target_coords.y += (Math.random() * error) / 4;
-    if (target_coords.z > 0) {
-      target_coords.z += (Math.random() * error) / 4;
-    }
+    //let error = 100 - (pass_accuracy * d) / 100;
+    //target_coords.x += (Math.random() * error) / 4;
+    //target_coords.y += (Math.random() * error) / 4;
+    //if (target_coords.z > 0) {
+     // target_coords.z += (Math.random() * error) / 4;
+    //}
+
 
     // caluclate speed to apply to ball
     // better passing and technique means faster pass
     // max speed = 25 m/s
-    let technique = this.attributes.get_attr("technique");
-    if (technique == undefined) {
-      technique = 25;
+    // min speed = 15 m/s
+    // optimal speed is one that takes 1 second to reach target
+
+    let max_speed = 15 + (pass_accuracy / 100) * 10;
+    let speed = max_speed;
+
+    let distance = dist(this.loc, target_coords);
+    let optimal_speed = distance;
+    if (optimal_speed > max_speed) {
+      speed = max_speed;
+    } else {
+      speed = optimal_speed;
     }
-    let speed = (25 * (pass_accuracy / 100) * technique) / 100;
+
+    
     // calculate dx, dy, dz
     let dx = ((target_coords.x - this.loc.x) / d) * speed;
     let dy = ((target_coords.y - this.loc.y) / d) * speed;
+    let dz = 0;
     if (lob || cross) {
-      let dz = ((target_coords.z - this.loc.z) / d) * speed;
+      dz = ((target_coords.z - this.loc.z) / d) * speed;
     }
+    dx /= 60;
+    dy /= 60;
+    if (lob || cross) {
+      dz /= 60;
+    }
+
+    this.attempt_pass(dx, dy, dz);
+
   }
 
   choose_pass_target(team: Team, opp: Team) {
@@ -235,13 +467,11 @@ export class PlayerOnPitch extends Player {
       let facing = Math.atan2(this.dy, this.dx);
       let diff = Math.abs(angle - facing);
       if (diff < Math.PI / 4) {
-        console.log(diff);
         scores[players.indexOf(p)] += 1;
       }
       // players under pressure have a lower chance of being passed to
       let pressure = p.calculate_pressure(opp);
       scores[players.indexOf(p)] -= pressure;
-      console.log(scores);
       // players in a threatening position have a higher chance of being passed to
       let threat = p.calculate_threat(team);
       scores[players.indexOf(p)] += threat;
@@ -250,9 +480,10 @@ export class PlayerOnPitch extends Player {
       scores.sort((a, b) => {
         return b - a;
       });
+
     }
 
-    console.log(scores);
+
 
     // randomly choose player
     // use decision making attribute
@@ -263,15 +494,13 @@ export class PlayerOnPitch extends Player {
     if (decisions == undefined) {
       decisions = 25;
     }
-    console.log(decisions);
+
     // lower decisions means more deviatione
     // maximum randomness = 0.5
     // minimum randomness = 0.1
     let randomness = 0.5 - (decisions / 100) * 0.4;
     let index = Math.floor(Math.random() * randomness * 10);
-    console.log(index);
     let target = players[index];
-    console.log(target);
     return target;
   }
 
@@ -281,6 +510,9 @@ export class PlayerOnPitch extends Player {
     opponents.forEach((player) => {
       let d = dist(this.loc, player.loc);
       if (d < 10) {
+        if (d == 0 ) {
+          d += 0.1;
+        }
         pressure += 1 / (d * d);
       }
     });
@@ -291,7 +523,6 @@ export class PlayerOnPitch extends Player {
     // "brownian motion" for players
     // randomly move around in small radius around current location
 
-    console.log("here");
 
     let radius = 0.05;
     let x = this.loc.x + (Math.random() - 0.5) * radius;
@@ -345,11 +576,9 @@ export class PlayerOnPitch extends Player {
 
   initialize() {
     this.target_speed = 0;
-    this.target_loc = new Polygon([
-      { x: 0, y: 0, z: 0 },
-      { x: 0, y: 0, z: 0 },
-      { x: 0, y: 0, z: 0 },
-    ]);
+    this.target_loc =  (
+      { x: 105/2, y: 68/2, z: 0 }
+    );
     this.loc = { x: 40, y: 52, z: 0 };
 
     this.dx = 0;
@@ -422,15 +651,17 @@ export class Match {
   max_2nd_half_extra_time: number;
   possible_penalties: boolean;
   is_penalties: boolean;
-  possession: Team;
-  outOfPossession: Team;
+  possession: Team|null;
+  outOfPossession: Team|null;
   player_possession: PlayerOnPitch | null;
   ticks: number;
+  clock_ticks: number;
   team_kicked_off_first: Team;
   ball_pos: Coords;
   ball_dx: number;
   ball_dy: number;
   ball_dz: number;
+  ball_target: Coords;
   _venue: Venue;
   TOP_LEFT: Coords;
   TOP_RIGHT: Coords;
@@ -443,6 +674,8 @@ export class Match {
   backgroundCtx: ImageBitmapRenderingContext;
   bitmap: ImageBitmap;
   foreground: HTMLCanvasElement | null;
+  playersOnPitch: PlayerOnPitch[];
+  stat:Stat;
 
   set home(home: Team) {
     this._home = home;
@@ -470,6 +703,10 @@ export class Match {
   }
   get venue() {
     return this._venue;
+  }
+
+  record(stat:string, player:PlayerOnPitch) {
+    this.stat.record(stat,player);
   }
 
   initialize(rules: Map<string, boolean>) {
@@ -504,13 +741,19 @@ export class Match {
 
     this.ball_pos = {
       x: this.venue.dimensions.kickoff_spot.x,
-      y: this._venue.width / 2,
+      y: this.venue.width / 2,
       z: 0,
     };
 
-    this.ball_dx = 10 / 60;
+    this.ball_dx = 0 / 60;
     this.ball_dy = 0 / 60;
     this.ball_dz = 0;
+
+    this.ball_target = {
+      x: this.venue.dimensions.kickoff_spot.x,
+      y: this.venue.dimensions.kickoff_spot.y,
+      z: 0,
+    }
 
     let rand = Math.random();
     if (rand < 0.5) {
@@ -549,11 +792,22 @@ export class Match {
 
     this.home.playersOnPitch.forEach((player) => {
       player.venue = this.venue;
+      player.team = this.home;
+      player.m = this;
     });
 
     this.away.playersOnPitch.forEach((player) => {
       player.venue = this.venue;
+      player.team = this.away;
+      player.m = this;
     });
+
+    this.playersOnPitch = [
+      ...this.home.playersOnPitch,
+      ...this.away.playersOnPitch,
+    ];
+
+    this.stat = new Stat(this);
 
     this.background = new OffscreenCanvas(900, 900);
     draw_pitch(this.background);
@@ -576,9 +830,13 @@ export class Match {
   }
 
   update_clock() {
+    
     const clock: HTMLDivElement | null = document.querySelector("#clock");
     if (clock) {
       clock.innerHTML = this.fmt_seconds(this.time);
+      setInterval(() => {
+        clock.innerHTML = this.fmt_seconds(this.time);
+      }, 1000);
     }
   }
 
@@ -593,12 +851,115 @@ export class Match {
   }
 
   players_decide() {
-    this.home.playersOnPitch.forEach((player) => {
-      player.decide_action();
-    });
     this.away.playersOnPitch.forEach((player) => {
-      player.decide_action();
+      player.decide_action(this);
     });
+    this.home.playersOnPitch.forEach((player) => {
+      player.decide_action(this);
+    });
+    
+  }
+
+  // update ball possession
+  update_possession() {
+    let closest = this.closest_to_ball();
+        
+    // if the ball is more than 2m away from any players,
+    // possession is null
+    if (dist(closest[0].loc, this.ball_pos) > 2 && dist(closest[1].loc, this.ball_pos) > 2) {
+      this.player_possession = null;
+      this.set_possession(null);
+    }
+    else {
+      closest.sort((a, b) => {
+        return dist(a.loc, this.ball_pos) - dist(b.loc, this.ball_pos);
+      });
+      this.player_possession = closest[0];
+      this.set_possession(closest[0].team);
+
+    }
+  }
+
+  closest_to_ball() {
+    let closest:PlayerOnPitch[] = [];
+
+    let temp: PlayerOnPitch = this.home.playersOnPitch[0];
+    let min_dist = 1000;
+    for (let p of this.home.playersOnPitch) {
+      let d = dist(p.loc, this.ball_pos);
+      if (d < min_dist) {
+        temp = p;
+        min_dist = d;
+      }
+    }
+    closest.push(temp);
+    min_dist = 1000;
+    for (let p of this.away.playersOnPitch) {
+      let d = dist(p.loc, this.ball_pos);
+      if (d < min_dist) {
+        temp = p;
+        min_dist = d;
+      }
+    }
+    closest.push(temp);
+
+    return closest;
+
+  }
+
+  collision_detection() {
+    // two players can't occupy the same space
+
+    let radius = 0.8;
+
+    for (let p of this.playersOnPitch) {
+      for (let q of this.playersOnPitch
+        .filter((player) => {
+          return player != p;
+        })) {
+        let d = dist(p.loc, q.loc);
+        if (d < radius) {
+          // collision
+          // move p and q apart
+          p.loc.x += (p.loc.x - q.loc.x) /8;
+          p.loc.y += (p.loc.y - q.loc.y) /8;
+          q.loc.x += (q.loc.x - p.loc.x) /8;
+          q.loc.y += (q.loc.y - p.loc.y) /8;
+
+        }
+     }
+   }
+
+   // player can't go off the screen
+    for (let p of this.playersOnPitch) {
+      if (p.loc.x < 0) {
+        p.loc.x = 0;
+      }
+      if (p.loc.x > this.venue.length) {
+        console.log('here');
+        p.loc.x = this.venue.length;
+      }
+      if (p.loc.y < 0) {
+        p.loc.y = 0;
+      }
+      if (p.loc.y > this.venue.width) {
+        p.loc.y = this.venue.width;
+      }
+    }
+
+
+  // ball can't be inside a player
+  let ball_radius = 0.5;
+  for (let p of this.playersOnPitch) {
+    let d = dist(p.loc, this.ball_pos);
+    if (d < ball_radius) {
+      // collision
+       //move ball away from player
+      //this.ball_pos.x += (this.ball_pos.x - p.loc.x) / 2;
+      //this.ball_pos.y += (this.ball_pos.y - p.loc.y) / 2;
+    }
+  }
+
   }
 
   move_ball() {
@@ -606,9 +967,44 @@ export class Match {
     this.ball_pos.y += this.ball_dy;
     this.ball_pos.z += this.ball_dz;
 
-    this.ball_dx *= 0.99;
-    this.ball_dy *= 0.99;
-    this.ball_dz *= 0.99;
+    // calculate decelration
+    // mass = 0.43 kg
+    // friction coefficient = 0.03
+    // f_friction = 0.03 * 0.43 kg * 9.81 m/s/s = 0.01265 kg m/s/s
+    // f_drag = 0.5 * 0.03 * pi*(0.11m)^2 * 1.2 kg/m^3 * velocity^2
+    // f_total = f_friction + f_drag
+    // a = f_total / mass
+
+    let f_friction = 0.01265;
+    let f_drag = 0.5 * 0.03 * Math.PI * 0.11 * 0.11 * 1.2;
+    let f_total = f_friction + f_drag;
+    let a = f_total / 0.43;
+
+    // calculate new velocity
+    // v = u + at
+    // u = v - at
+    // v = 0
+    // t = 1/60
+
+    if (this.ball_dx < 0) {
+      this.ball_dx = this.ball_dx + a * (1 / 60);
+    }
+    if (this.ball_dx > 0) {
+      this.ball_dx = this.ball_dx - a * (1 / 60);
+    }
+    if (this.ball_dy < 0) {
+      this.ball_dy = this.ball_dy + a * (1 / 60);
+    }
+    if (this.ball_dy > 0) {
+      this.ball_dy = this.ball_dy - a * (1 / 60);
+    }
+    if (this.ball_dz < 0) {
+      this.ball_dz = this.ball_dz + a * (1 / 60);
+    }
+    if (this.ball_dz > 0) {
+      this.ball_dz = this.ball_dz - a * (1 / 60);
+    }
+
 
     if (this.ball_dx < 0.02 && this.ball_dx > -0.02) {
       this.ball_dx = 0;
@@ -640,79 +1036,95 @@ export class Match {
   }
 
   draw_ball() {
-    let ctx = this.foreground?.getContext("2d");
-    if (this.foreground) {
-      if (ctx) {
-        let length = this.background.width;
-        let width = this.background.height;
+    requestAnimationFrame(() => {
+      let ctx = this.foreground?.getContext("2d");
+      if (this.foreground) {
         if (ctx) {
-          let x = (this.ball_pos.x / this.venue.length) * length;
-          let y = (this.ball_pos.y / this.venue.width) * width;
+          let length = this.background.width;
+          let width = this.background.height;
+          if (ctx) {
+            let x = (this.ball_pos.x / this.venue.length) * length;
+            let y = (this.ball_pos.y / this.venue.width) * width;
 
-          ctx.fillStyle = "black";
-          ctx.beginPath();
-          ctx.arc(x, y, 3.4, 0, 2 * Math.PI);
-          ctx.fill();
+            // if z is larger than the radius should be larger
+            let radius = 3.4;
+            if (this.ball_pos.z > 0) {
+              radius += this.ball_pos.z;
+            }
 
-          ctx.fillStyle = "white";
-          ctx.beginPath();
-          ctx.arc(x, y, 2.4, 0, 2 * Math.PI);
-          ctx.fill();
+            ctx.fillStyle = "black";
+            ctx.beginPath();
+            ctx.arc(x, y, radius, 0, 2 * Math.PI);
+            ctx.fill();
+
+            ctx.fillStyle = "white";
+            ctx.beginPath();
+            ctx.arc(x, y, radius-1, 0, 2 * Math.PI);
+            ctx.fill();
+          }
         }
       }
-    }
+    });
   }
 
   draw_players() {
-    let ctx = this.foreground?.getContext("2d");
-    if (this.foreground) {
-      let length = this.background.width;
-      let width = this.background.height;
-      this.home.playersOnPitch.forEach((player) => {
-        let x = (player.loc.x / this.venue.length) * length;
-        let y = (player.loc.y / this.venue.width) * width;
-        if (ctx) {
-          ctx.fillStyle = "black";
-          ctx.beginPath();
-          ctx.arc(x, y, 4.4, 0, 2 * Math.PI);
-          ctx.fill();
+    requestAnimationFrame(() => {
+      let ctx = this.foreground?.getContext("2d");
+      if (this.foreground) {
+        let length = this.background.width;
+        let width = this.background.height;
+        this.home.playersOnPitch.forEach((player) => {
+          let x = (player.loc.x / this.venue.length) * length;
+          let y = (player.loc.y / this.venue.width) * width;
+          if (ctx) {
+            ctx.fillStyle = "black";
+            ctx.beginPath();
+            ctx.arc(x, y, 4.4, 0, 2 * Math.PI);
+            ctx.fill();
 
-          ctx.fillStyle = "white";
-          ctx.beginPath();
-          ctx.arc(x, y, 3.4, 0, 2 * Math.PI);
-          ctx.fill();
-        }
-      });
-      this.away.playersOnPitch.forEach((player) => {
-        let x = (player.loc.x / this.venue.length) * length;
-        let y = (player.loc.y / this.venue.width) * width;
-        if (ctx) {
-          ctx.fillStyle = "white";
-          ctx.beginPath();
-          ctx.arc(x, y, 5, 0, 2 * Math.PI);
-          ctx.fill();
+            ctx.fillStyle = "white";
+            ctx.beginPath();
+            ctx.arc(x, y, 3.4, 0, 2 * Math.PI);
+            ctx.fill();
+          }
+        });
+        this.away.playersOnPitch.forEach((player) => {
+          let x = (player.loc.x / this.venue.length) * length;
+          let y = (player.loc.y / this.venue.width) * width;
+          if (ctx) {
+            ctx.fillStyle = "white";
+            ctx.beginPath();
+            ctx.arc(x, y, 5, 0, 2 * Math.PI);
+            ctx.fill();
 
-          ctx.fillStyle = "black";
-          ctx.beginPath();
-          ctx.arc(x, y, 4, 0, 2 * Math.PI);
-          ctx.fill();
-        }
-      });
-    }
+            ctx.fillStyle = "black";
+            ctx.beginPath();
+            ctx.arc(x, y, 4, 0, 2 * Math.PI);
+            ctx.fill();
+          }
+        });
+      }
+    });
   }
 
   tick() {
+    
     this.time += 1 / 60;
     this.ticks += 1;
     if (this.ticks == 10) {
+      this.update_possession();
+      console.log(this.possession?.name);
+      // human reaction time is roughly
+      // a sixth of a second so only
+      // update every 10 ticks
       this.ticks = 0;
       this.players_decide();
     }
     this.draw_agents();
+    this.collision_detection();
     this.move_players();
     this.move_ball();
-
-    this.update_clock();
+  
   }
 
   getKickoffPlayer(team: Team) {
@@ -729,6 +1141,7 @@ export class Match {
           return a.get_attribute("passing") - b.get_attribute("passing");
         });
       }
+
       return players[0];
     } else {
       // choose most attacking player
@@ -823,31 +1236,43 @@ export class Match {
     }
   }
 
-  setPossession(team: Team) {
-    this.possession = team;
-    this.outOfPossession = team == this.home ? this.away : this.home;
+  set_possession(team: Team|null) {
+    
+    if (team instanceof Team) {
+      this.possession = team;
+      this.outOfPossession = team == this.home ? this.away : this.home;
+    } else {
+      this.possession = null;
+      this.outOfPossession = null;
+    }
   }
 
   do_kickoff(half: boolean) {
     const rand = Math.random();
+    let team = 0;
     if (!half) {
       if (rand < 0.5) {
-        this.setPossession(this.home);
+        this.set_possession(this.home);
         this.team_kicked_off_first = this.home;
       } else {
-        this.setPossession(this.away);
+        this.set_possession(this.away);
+        team = 1;
         this.team_kicked_off_first = this.away;
       }
     } else {
       if (this.team_kicked_off_first == this.home) {
-        this.setPossession(this.away);
+        this.set_possession(this.away);
+        team = 1;
       } else {
-        this.setPossession(this.home);
+        this.set_possession(this.home);
+        team = 0;
       }
     }
-    const p1 = this.getKickoffPlayer(this.possession);
+    let t = team == 0 ? this.home : this.away;
+    let o = team == 0 ? this.away : this.home;
+    const p1 = this.getKickoffPlayer(t);
     this.player_possession = p1;
-    this.player_possession.pass(this.possession, this.outOfPossession);
+    this.player_possession.pass(t, o);
   }
 
   async play() {
@@ -859,7 +1284,7 @@ export class Match {
     );
     while (this.half == 1 && this.time < this.max_1st_half_time) {
       if (!this.started) {
-        this.do_kickoff(false);
+        //this.do_kickoff(false);
         this.started = true;
       }
       let now = DateTime.now();
@@ -934,3 +1359,81 @@ export class Match {
     }
   }
 }
+
+export class Stat {
+  player_stats:PlayerMatchStats;
+
+  constructor (match:Match) {
+    let i = 0;
+    this.player_stats = new PlayerMatchStats();
+    for (let _ of match.playersOnPitch) {
+      this.player_stats.push(i);
+    }
+  }
+  record(stat:string, type:Player|Team) {
+    if (type instanceof Player) {
+      // record player stat
+      this.player_stats.record(stat);
+
+    }
+  }
+}
+
+class PlayerMatchStats {
+  _id: number;
+  _stats: Map<number, PlayerStats>;
+
+  constructor() {
+    this._id = 0;
+    this._stats = new Map();
+  }
+  push(id:number) {
+    this._id = id;
+    this._stats.set(id,{
+      goals: 0,
+      assists: 0,
+      passes_attempted: 0,
+      passes_completed: 0,
+      shots: 0,
+      shots_on_target: 0,
+      tackles_attempted: 0,
+      tackles_completed: 0,
+      interceptions: 0,
+      fouls: 0,
+      fouls_suffered: 0,
+      yellow_cards: 0,
+      red_cards: 0,
+      saves: 0,
+      goals_conceded: 0,
+      clean_sheets: 0,
+      penalties_scored: 0,
+      penalties_missed: 0,
+      penalties_saved: 0,
+      own_goals: 0,
+      minutes_played: 0,
+      xG: 0,
+      xA: 0,
+    });
+  }
+
+  record(stat:string) {
+    let s = this._stats.get(this._id);
+    if (s) {
+      if (stat == "passes_attempted") {
+        s.passes_attempted += 1;
+      }
+      if (stat == "passes_completed") {
+        s.passes_completed += 1;
+      }
+      if (stat == "shots") {
+        s.shots += 1;
+      }
+      if (stat == "shots_on_target") {
+        s.shots_on_target += 1;
+      }
+
+    }
+
+  }
+}
+

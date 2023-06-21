@@ -52,7 +52,6 @@ for (let i = 0; i < 22; i++) {
   }
 }
 
-console.log(players1);
 team1.playersOnPitch = players1;
 team2.playersOnPitch = players2;
 
@@ -96,8 +95,7 @@ export function draw_pitch(canvas: OffscreenCanvas) {
     const width = venue.dimensions.width * (length / venue.dimensions.length);
     canvas.width = length + 100;
     canvas.height = width + 100;
-    console.log(canvas.width, canvas.height);
-    ctx.fillStyle = "grey";
+    ctx.fillStyle = "#00ae00";
     ctx.fillRect(0, 0, canvas.width, canvas.height);
     ctx.fillStyle = "#00ae00";
     ctx.fillRect(50, 50, length, width);

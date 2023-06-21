@@ -122,15 +122,9 @@ export class PitchArea {
   length: number;
   width: number;
 
-  constructor(venue: Venue, area: string, side: "left" | "right") {
+  constructor(venue: Venue) {
     this.length = venue.length;
     this.width = venue.width;
-    let coords: Coords[] | undefined;
-    switch (area) {
-      case "GOALKEEPER_AREA": {
-        coords = this.gk_area(side);
-      }
-    }
   }
 
   set venue(venue: Venue) {
