@@ -112,11 +112,49 @@ export class PlayerOnPitch extends Player {
   }
 
   calculate_optimal_position(teamInPossession: Team|null) {
-    if (this.team == teamInPossession) {
-      // move towards more threatening positions
-      // or provide passing options
-
+    // move towards more threatening positions
+    // or provide passing options
+    
+    // iterate through positions in radius
+    // pick one based on movement attribute
+    // and team tactics
+    let radius = 10;
+    // 10 m
+    let positions:Coords[] = [];
+    for (let x = this.loc.x - radius; x < this.loc.x + radius; x+=2) {
+      for (let y = this.loc.y - radius; y < this.loc.y + radius; y+=2) {
+        positions.push({x:x,y:y,z:0});
+      }
     }
+    let scores = Array(positions.length).fill(0);
+    for (let p of positions) {
+      let threat = this.threat_at_position(this.team, p);
+      scores[positions.indexOf(p)] += threat;
+    }
+
+    // sort positions by score
+    scores.sort((a,b) => {
+      return b-a;
+    });
+
+    positions.sort((a,b) => {
+      return scores[positions.indexOf(b)] - scores[positions.indexOf(a)];
+    });      
+
+    let movement = this.attributes.get_attr("movement");
+    if (movement == undefined) {
+      movement = 25;
+    }
+    
+    // lower movement means more deviation
+    // maximum randomness = 0.5
+    // minimum randomness = 0.1
+
+    let randomness = 0.5 - (movement / 100) * 0.4;
+    let index = Math.floor(Math.random() * randomness * 10);
+    let target = positions[index];
+    console.log("moving to target" + target.x + " " + target.y);
+    return target;
   }
 
   kickoff_position() {
@@ -174,6 +212,95 @@ export class PlayerOnPitch extends Player {
 
   }
 
+  shoot() {
+    let shooting = this.attributes.get_attr("finishing");
+    if (shooting == undefined) {
+      shooting = 25;
+    }
+    // accuracy
+    // max accuracy_radius = 1.25m
+    // min accuracy_radius = 0.25m
+    let accuracy_radius = 1.25 - (shooting / 100) * 1;
+    // power
+    let technique = this.attributes.get_attr("technique");
+    if (technique == undefined) {
+      technique = 25;
+    }
+    // max power = 25 m/s
+    // min power = 15 m/s
+    let max_power = 15 + (technique / 100) * 10;
+    let power = max_power;
+    // distance to goal
+    let direction = this.team.attacking_direction;
+    let left: Coords = {
+      x: 0,
+      y: this.venue.width / 2,
+      z: 0,
+    };
+    let right: Coords = { 
+      x: this.venue.length,
+      y: this.venue.width / 2,
+      z: 0,
+    };
+
+    // choose side of goal
+    let target: Coords;
+    if (direction == "left") {
+      if (Math.random() < 0.5) {
+        target = {
+          x: -2,
+          y: this.venue.width / 2 - 1,
+          z: 1.25,
+        }
+      } else {
+        target = {
+          x: -2,
+          y: this.venue.width / 2 + 1,
+          z: 1.25,
+        }
+      }
+    } else {
+      if (Math.random() < 0.5) {
+        target = {
+          x: this.venue.length + 2,
+          y: this.venue.width / 2 - 1,
+          z: 1.25,
+        }
+      } else {
+        target = {
+          x: this.venue.length + 2,
+          y: this.venue.width / 2 + 1,
+          z: 1.25,
+        }
+      }
+    }
+
+    // apply error to target_coords based on shooting accuracy and distance
+    target.x += rand_in_range(-accuracy_radius, accuracy_radius);
+    target.y += rand_in_range(-accuracy_radius, accuracy_radius);
+    target.z += rand_in_range(-accuracy_radius, accuracy_radius);
+
+    // caluclate speed to apply to ball
+    let speed = max_power;
+    let distance = dist(this.loc, target);
+    let error_plus_minus_percentage = 0.15 - (technique / 100) * 0.1;
+    let dx = ((target.x - this.loc.x) / distance) * speed;
+    let dy = ((target.y - this.loc.y) / distance) * speed;
+    let dz = ((target.z - this.loc.z) / distance) * speed;
+    dx /= 60;
+    dy /= 60;
+    dz /= 60;
+
+    this.attempt_shot(dx, dy, dz);
+
+  }
+
+  attempt_shot(dx, dy, dz) {
+    this.m.ball_dx = dx;
+    this.m.ball_dy = dy;
+    this.m.ball_dz = dz;
+    this.m.record("shots", this);
+  }
   decide_action(m:Match) {
     // if ball is not possessed by anyone, and player is closest 
     // teammate, try to get it
@@ -182,44 +309,66 @@ export class PlayerOnPitch extends Player {
       if (closest.includes(this)) {
         this.get_ball(m);
       } else {
-        this.decelerate();
-        console.log("decelerating");
+        if (this.receive_pass) {
+          console.log("receiving pass");
+          this.move_to(m.ball_pos, 'max');
+        }
+        else {
+          this.calculate_optimal_position(m.outOfPossession);
+
+          this.move_to(this.target_loc,'medium');
+        }
       }
     } else {
+      this.receive_pass = false;
       // if ball is possessed by self
       if (m.player_possession == this) {
         // dribble, pass, or shoot
         // calculate teammate threat
         let teammate_threat = new Array(this.team.playersOnPitch.length-1).fill(0);
+        let teammate_pressure = new Array(this.team.playersOnPitch.length-1).fill(0);
+        let diff = new Array(this.team.playersOnPitch.length-1).fill(0);
         for (let p of this.team.playersOnPitch.filter((player) => {
           return player != this;
         })) {
           let threat = p.calculate_threat(this.team);
+          let pressure = p.calculate_pressure(m.outOfPossession as Team);
           teammate_threat[this.team.playersOnPitch.indexOf(p)] = threat;
+          teammate_pressure[this.team.playersOnPitch.indexOf(p)] = pressure;
+          diff[this.team.playersOnPitch.indexOf(p)] = (threat - pressure)*.75;
         }
 
         let self_threat = this.calculate_threat(this.team);
-        let max_threat = Math.max(...teammate_threat);
-        if (max_threat > self_threat) {
+        let self_pressure = this.calculate_pressure(m.outOfPossession as Team);
+        let self_diff = self_threat - self_pressure;
+        let max_diff = Math.max(...diff);
+        console.log(self_diff, max_diff);
+        if (max_diff > self_diff) {
           // pass
           this.pass(this.team, m.outOfPossession as Team);
-        } else {
-          // dribble
-          this.dribble();
-        }
+        } else if (self_diff > max_diff){
+          // if self diff is lower than shot threshold,
+          // dribble to a more threatening position
+          if (self_diff < 0.0001) {
+            this.dribble();
+          }
+          else {
+            // shoot
+            this.shoot();
+          }
+        } ;
 
       }
 
       else {
         // if ball is possessed by teammate
-        // move to random position in attacking third
+        // move to optimal position
+        let target = this.calculate_optimal_position(m.outOfPossession);
+        if (target==undefined) {
+          target = {x:0,y:0,z:0};
+        }
+        this.move_to(target,'medium');
 
-        this.target_loc.x += rand_in_range(-3,3);
-
-    
-        this.target_loc.y += rand_in_range(-3,3);
-
-        this.move_to(this.target_loc,'max');
       }
         
         
@@ -330,6 +479,7 @@ export class PlayerOnPitch extends Player {
       y: target.loc.y,
       z: target.loc.z,
     };
+    this.m.ball_target = target_coords;
     // choose whether to lob or pass on ground
     let lob = false;
     if (d > 20) {
@@ -382,13 +532,15 @@ export class PlayerOnPitch extends Player {
 
     //calculate accuracy
     //apply error to target_coords based on passing accuracy and distance
-    //let error = 100 - (pass_accuracy * d) / 100;
-    //target_coords.x += (Math.random() * error) / 4;
-    //target_coords.y += (Math.random() * error) / 4;
-    //if (target_coords.z > 0) {
-     // target_coords.z += (Math.random() * error) / 4;
-    //}
-
+    // worse passing accuracy means a larger error radius
+    // max radius: 2m
+    // min radius: .35m
+    let error_radius = 0.35 + (pass_accuracy / 100) * 1.65;
+    // pick random point in the circle
+    let r = Math.random() * error_radius;
+    let theta = Math.random() * 2 * Math.PI;
+    target_coords.x += r * Math.cos(theta);
+    target_coords.y += r * Math.sin(theta);
 
     // caluclate speed to apply to ball
     // better passing and technique means faster pass
@@ -400,14 +552,17 @@ export class PlayerOnPitch extends Player {
     let speed = max_speed;
 
     let distance = dist(this.loc, target_coords);
-    let optimal_speed = distance;
-    if (optimal_speed > max_speed) {
-      speed = max_speed;
-    } else {
-      speed = optimal_speed;
+    let technique = this.attributes.get_attr("technique");
+    if (technique == undefined) {
+      technique = 25;
     }
-
+    let error_plus_minus_percentage = 0.15 - (technique / 100) * 0.1;
+    let optimal_speed = distance/2;
+    speed = optimal_speed * (1 + error_plus_minus_percentage * rand_in_range(-1,1));
     
+    if (speed > max_speed) {
+      speed = max_speed;
+    }
     // calculate dx, dy, dz
     let dx = ((target_coords.x - this.loc.x) / d) * speed;
     let dy = ((target_coords.y - this.loc.y) / d) * speed;
@@ -570,6 +725,31 @@ export class PlayerOnPitch extends Player {
     } else {
       //right side goal
       let d = dist(this.loc, right);
+      return 1 / (d * d);
+    }
+  }
+
+  threat_at_position(team:Team, loc:Coords) {
+    // distance to goal
+    let direction = team.attacking_direction;
+    let left: Coords = {
+      x: 0,
+      y: this.venue.width / 2,
+      z: 0,
+    };
+    let right: Coords = {
+      x: this.venue.length,
+      y: this.venue.width / 2,
+      z: 0,
+    };
+
+    if (direction == "left") {
+      //left side goal
+      let d = dist(loc, left);
+      return 1 / (d * d);
+    } else {
+      //right side goal
+      let d = dist(loc, right);
       return 1 / (d * d);
     }
   }
@@ -949,14 +1129,14 @@ export class Match {
 
 
   // ball can't be inside a player
-  let ball_radius = 0.5;
+  let ball_radius = 0.22;
   for (let p of this.playersOnPitch) {
     let d = dist(p.loc, this.ball_pos);
     if (d < ball_radius) {
       // collision
        //move ball away from player
-      //this.ball_pos.x += (this.ball_pos.x - p.loc.x) / 2;
-      //this.ball_pos.y += (this.ball_pos.y - p.loc.y) / 2;
+      this.ball_pos.x += (this.ball_pos.x - p.loc.x) / 2;
+      this.ball_pos.y += (this.ball_pos.y - p.loc.y) / 2;
     }
   }
 
@@ -972,13 +1152,21 @@ export class Match {
     // friction coefficient = 0.03
     // f_friction = 0.03 * 0.43 kg * 9.81 m/s/s = 0.01265 kg m/s/s
     // f_drag = 0.5 * 0.03 * pi*(0.11m)^2 * 1.2 kg/m^3 * velocity^2
+    // velocity = dx * 60 + dy * 60 + dz * 60 (m/s)
     // f_total = f_friction + f_drag
     // a = f_total / mass
 
     let f_friction = 0.01265;
-    let f_drag = 0.5 * 0.03 * Math.PI * 0.11 * 0.11 * 1.2;
-    let f_total = f_friction + f_drag;
-    let a = f_total / 0.43;
+
+    let f_drag_x = 0.5 * 0.03 * Math.PI * 0.11 * 0.11 * 1.2 * this.ball_dx*this.ball_dx;
+    let f_drag_y = 0.5 * 0.03 * Math.PI * 0.11 * 0.11 * 1.2 * this.ball_dy*this.ball_dy;
+    let f_drag_z = 0.5 * 0.03 * Math.PI * 0.11 * 0.11 * 1.2 * this.ball_dz*this.ball_dz;
+    let f_total_x = f_friction + f_drag_x;
+    let f_total_y = f_friction + f_drag_y;
+    let f_total_z = f_drag_z;
+    let a_x = f_total_x / 0.43;
+    let a_y = f_total_y / 0.43;
+    let a_z = f_total_z / 0.43;
 
     // calculate new velocity
     // v = u + at
@@ -986,25 +1174,27 @@ export class Match {
     // v = 0
     // t = 1/60
 
-    if (this.ball_dx < 0) {
-      this.ball_dx = this.ball_dx + a * (1 / 60);
-    }
+    //apply a to dx, dy, dz
     if (this.ball_dx > 0) {
-      this.ball_dx = this.ball_dx - a * (1 / 60);
-    }
-    if (this.ball_dy < 0) {
-      this.ball_dy = this.ball_dy + a * (1 / 60);
+      this.ball_dx -= a_x / 60;
+    } else if (this.ball_dx < 0) {
+      this.ball_dx += a_x / 60;
     }
     if (this.ball_dy > 0) {
-      this.ball_dy = this.ball_dy - a * (1 / 60);
-    }
-    if (this.ball_dz < 0) {
-      this.ball_dz = this.ball_dz + a * (1 / 60);
+      this.ball_dy -= a_y / 60;
+    } else if (this.ball_dy < 0) {
+      this.ball_dy += a_y / 60;
     }
     if (this.ball_dz > 0) {
-      this.ball_dz = this.ball_dz - a * (1 / 60);
+      this.ball_dz -= a_z / 60;
+    } else if (this.ball_dz < 0) {
+      this.ball_dz += a_z / 60;
     }
 
+    
+
+
+    // if velocity is too small, set to 0
 
     if (this.ball_dx < 0.02 && this.ball_dx > -0.02) {
       this.ball_dx = 0;
@@ -1049,7 +1239,7 @@ export class Match {
             // if z is larger than the radius should be larger
             let radius = 3.4;
             if (this.ball_pos.z > 0) {
-              radius += this.ball_pos.z;
+              radius += this.ball_pos.z*2;
             }
 
             ctx.fillStyle = "black";
@@ -1061,6 +1251,14 @@ export class Match {
             ctx.beginPath();
             ctx.arc(x, y, radius-1, 0, 2 * Math.PI);
             ctx.fill();
+
+            let target_x = (this.ball_target.x/this.venue.length)*length;
+            let target_y = (this.ball_target.y/this.venue.width)*width;
+
+            ctx.strokeStyle = "red";
+            ctx.beginPath();
+            ctx.arc(target_x, target_y, radius, 0, 2 * Math.PI);
+            ctx.stroke();
           }
         }
       }
@@ -1271,6 +1469,13 @@ export class Match {
     let t = team == 0 ? this.home : this.away;
     let o = team == 0 ? this.away : this.home;
     const p1 = this.getKickoffPlayer(t);
+    p1.loc.x = this.venue.dimensions.kickoff_spot.x;
+    if (p1.team.attacking_direction == "left") {
+      p1.loc.x -= 1;
+    } else {
+      p1.loc.x += 1;
+    }
+    p1.loc.y = this.venue.dimensions.kickoff_spot.y;
     this.player_possession = p1;
     this.player_possession.pass(t, o);
   }
@@ -1284,7 +1489,7 @@ export class Match {
     );
     while (this.half == 1 && this.time < this.max_1st_half_time) {
       if (!this.started) {
-        //this.do_kickoff(false);
+        this.do_kickoff(false);
         this.started = true;
       }
       let now = DateTime.now();
