@@ -1,4 +1,5 @@
 import { Match, Team, PlayerOnPitch } from "./game";
+import { SimMatch } from "./sim_game";
 import { Player, Position, Role } from "./person";
 import { City, Country, PitchDimensions, Venue } from "./place";
 import { Attribute, OutfieldAttribute, Attributes } from "./person";
@@ -6,6 +7,7 @@ import { meters_to_px } from "../common/helpers";
 import { DateTime } from "luxon";
 import { Polygon, attribute_names, gk_attribute_names } from "../common/types";
 
+const start_date = DateTime.local(2022,7,1);
 const team1 = new Team("Barcelona");
 const team2 = new Team("Real Madrid");
 const match = new Match();
@@ -20,6 +22,11 @@ const country = new Country();
 country.name = "Spain";
 city.country = country;
 venue.city = city;
+
+let date_text = document.querySelector("#date-text");
+if (date_text) {
+  date_text.innerHTML = start_date.toLocaleString(DateTime.DATE_FULL);
+}
 
 const positions = [
   { name: "Goalkeeper", abbreviation: "GK" },

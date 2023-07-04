@@ -134,8 +134,12 @@ export class Attributes {
     return this._attributes;
   }
 
-  get_attr(name: string) {
-    return this._attributes.get(name);
+  get_attr(name: string) : number {
+    let ret = this._attributes.get(name);
+    if (ret!=undefined) {
+      return ret;
+    }
+    return 25;
   }
 
   set_attr(name: string, value: number) {

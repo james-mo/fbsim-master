@@ -12,6 +12,7 @@ import { Coords, PitchArea, Polygon } from "../common/types";
 import { DateTime } from "luxon";
 import { draw_pitch } from "./index";
 import { dist, in_range, meters_to_px, rand_in_range } from "../common/helpers";
+import { SimMatch } from "./sim_game";
 
 type PlayerStats = {
   goals: number;
@@ -136,6 +137,7 @@ export class PlayerOnPitch extends Player {
     scores.sort((a,b) => {
       return b-a;
     });
+    console.log(scores);
 
     positions.sort((a,b) => {
       return scores[positions.indexOf(b)] - scores[positions.indexOf(a)];
@@ -153,7 +155,7 @@ export class PlayerOnPitch extends Player {
     let randomness = 0.5 - (movement / 100) * 0.4;
     let index = Math.floor(Math.random() * randomness * 10);
     let target = positions[index];
-    console.log("moving to target" + target.x + " " + target.y);
+    console.log(target);
     return target;
   }
 
@@ -310,11 +312,10 @@ export class PlayerOnPitch extends Player {
         this.get_ball(m);
       } else {
         if (this.receive_pass) {
-          console.log("receiving pass");
           this.move_to(m.ball_pos, 'max');
         }
         else {
-          this.calculate_optimal_position(m.outOfPossession);
+          this.target_loc = this.calculate_optimal_position(m.outOfPossession);
 
           this.move_to(this.target_loc,'medium');
         }
@@ -342,7 +343,6 @@ export class PlayerOnPitch extends Player {
         let self_pressure = this.calculate_pressure(m.outOfPossession as Team);
         let self_diff = self_threat - self_pressure;
         let max_diff = Math.max(...diff);
-        console.log(self_diff, max_diff);
         if (max_diff > self_diff) {
           // pass
           this.pass(this.team, m.outOfPossession as Team);
@@ -1116,7 +1116,6 @@ export class Match {
         p.loc.x = 0;
       }
       if (p.loc.x > this.venue.length) {
-        console.log('here');
         p.loc.x = this.venue.length;
       }
       if (p.loc.y < 0) {
@@ -1161,12 +1160,15 @@ export class Match {
     let f_drag_x = 0.5 * 0.03 * Math.PI * 0.11 * 0.11 * 1.2 * this.ball_dx*this.ball_dx;
     let f_drag_y = 0.5 * 0.03 * Math.PI * 0.11 * 0.11 * 1.2 * this.ball_dy*this.ball_dy;
     let f_drag_z = 0.5 * 0.03 * Math.PI * 0.11 * 0.11 * 1.2 * this.ball_dz*this.ball_dz;
+    if (this.ball_pos.z > 0) {
+      f_friction = 0;
+    }
     let f_total_x = f_friction + f_drag_x;
     let f_total_y = f_friction + f_drag_y;
     let f_total_z = f_drag_z;
     let a_x = f_total_x / 0.43;
     let a_y = f_total_y / 0.43;
-    let a_z = f_total_z / 0.43;
+    let a_z = (9.81) - f_total_z / 0.43;
 
     // calculate new velocity
     // v = u + at
@@ -1185,10 +1187,17 @@ export class Match {
     } else if (this.ball_dy < 0) {
       this.ball_dy += a_y / 60;
     }
+    console.log(this.ball_dz);
+    console.log(this.ball_pos.z);
+
     if (this.ball_dz > 0) {
       this.ball_dz -= a_z / 60;
-    } else if (this.ball_dz < 0) {
-      this.ball_dz += a_z / 60;
+    } else if (this.ball_dz <= 0) {
+      // check if need to bounce
+      if (this.ball_pos.z < .16) {
+        this.ball_pos.z = 0;
+        this.ball_dz = -this.ball_dz;
+      }
     }
 
     
@@ -1311,7 +1320,6 @@ export class Match {
     this.ticks += 1;
     if (this.ticks == 10) {
       this.update_possession();
-      console.log(this.possession?.name);
       // human reaction time is roughly
       // a sixth of a second so only
       // update every 10 ticks
@@ -1477,7 +1485,10 @@ export class Match {
     }
     p1.loc.y = this.venue.dimensions.kickoff_spot.y;
     this.player_possession = p1;
-    this.player_possession.pass(t, o);
+    //this.player_possession.pass(t, o);
+    this.ball_dx = 1/60;
+    this.ball_dy = 1/60;
+    this.ball_dz = 60/60;
   }
 
   async play() {
@@ -1568,7 +1579,7 @@ export class Match {
 export class Stat {
   player_stats:PlayerMatchStats;
 
-  constructor (match:Match) {
+  constructor (match:Match|SimMatch) {
     let i = 0;
     this.player_stats = new PlayerMatchStats();
     for (let _ of match.playersOnPitch) {
