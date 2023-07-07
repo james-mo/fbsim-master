@@ -7,7 +7,7 @@ import {
   TeamInstruction,
   PlayerInstruction,
 } from "./person";
-import { PitchDimensions, Venue } from "./place";
+import { PitchDimensions, PitchZone, Venue } from "./place";
 import { Coords, PitchArea, Polygon } from "../common/types";
 import { DateTime } from "luxon";
 import { draw_pitch } from "./index";
@@ -52,6 +52,7 @@ export class PlayerOnPitch extends Player {
   venue: Venue;
   team:Team;
   receive_pass: boolean;
+  _zones: number[];
 
   target_speed: number;
   target_loc: Coords;
@@ -70,6 +71,14 @@ export class PlayerOnPitch extends Player {
 
   get position() {
     return this._position;
+  }
+
+  get pitchZoneScores(): number[] {
+    return this._zones;
+  }
+
+  set pitchZoneScores(scores: number[]) {
+    this._zones = scores;
   }
 
   set instructions(instructions: PlayerInstruction[]) {
@@ -112,6 +121,10 @@ export class PlayerOnPitch extends Player {
     return this._dz;
   }
 
+  calculate_pitch_zone_scores() {
+    this.pitchZoneScores = PitchZone.get_score(this.position, this.team.attacking_direction);
+  }
+
   calculate_optimal_position(teamInPossession: Team|null) {
     // move towards more threatening positions
     // or provide passing options
@@ -119,34 +132,39 @@ export class PlayerOnPitch extends Player {
     // iterate through positions in radius
     // pick one based on movement attribute
     // and team tactics
-    let radius = 10;
+
+    // bias towards positions with higher zone scores
+
+    /*let radius = 10;
     // 10 m
-    let positions:Coords[] = [];
+    let positions: {pos:Coords,score:number}[] = [];
     for (let x = this.loc.x - radius; x < this.loc.x + radius; x+=2) {
       for (let y = this.loc.y - radius; y < this.loc.y + radius; y+=2) {
-        positions.push({x:x,y:y,z:0});
+        let position = {x:x,y:y,z:0};
+        let threat = this.threat_at_position(this.team, position);
+        positions.push({pos: position, score: threat});
       }
     }
-    let scores = Array(positions.length).fill(0);
-    for (let p of positions) {
-      let threat = this.threat_at_position(this.team, p);
-      scores[positions.indexOf(p)] += threat;
+
+    let zone_bias = 0.5;
+    for (let i = 0; i < this.pitchZoneScores.length; i++) {
+      if (this.pitchZoneScores[i] > 0) {
+        let zone_coords = PitchZone.get_coords(i);
+        for (let pos of positions) {
+          if (in_range(pos.pos.x, [zone_coords.x-5.25, zone_coords.x+5.25])) {
+            if (in_range(pos.pos.y, [zone_coords.y-9.714/2, zone_coords.y+9.714/2])) {
+
+            }
+          }
+        }
+      }
     }
-
-    // sort positions by score
-    scores.sort((a,b) => {
-      return b-a;
-    });
-    console.log(scores);
-
+    
     positions.sort((a,b) => {
-      return scores[positions.indexOf(b)] - scores[positions.indexOf(a)];
-    });      
+      return b.score - a.score;
+    });
 
-    let movement = this.attributes.get_attr("movement");
-    if (movement == undefined) {
-      movement = 25;
-    }
+    let movement = this.attributes.get_attr("movement") ?? 25;
     
     // lower movement means more deviation
     // maximum randomness = 0.5
@@ -154,9 +172,61 @@ export class PlayerOnPitch extends Player {
 
     let randomness = 0.5 - (movement / 100) * 0.4;
     let index = Math.floor(Math.random() * randomness * 10);
-    let target = positions[index];
-    console.log(target);
+
+    let target = positions[index].pos;
+    return target;*/
+
+    //calculate midpoint of zone scores
+    let midpoint = {x:0,y:0,z:0};
+    let total = 0;
+    for (let i = 0; i < this.pitchZoneScores.length; i++) {
+      let coords = PitchZone.get_coords(i);
+      if(this.pitchZoneScores[i] > 0) {
+        midpoint.x += coords.x * this.pitchZoneScores[i];
+        midpoint.y += coords.y * this.pitchZoneScores[i];
+        total += this.pitchZoneScores[i];
+      }
+    }
+    midpoint.x /= total;
+    midpoint.y /= total;
+
+    let zone_bias = 0;
+    if (this.m.possession == this.team) {
+      zone_bias = 0.25;
+    } else {
+      zone_bias = 0.5;
+    }
+
+    let radius = 10;
+    // 10 m
+    let positions: {pos:Coords,score:number}[] = [];
+    for (let x = this.loc.x - radius; x < this.loc.x + radius; x+=2) {
+      for (let y = this.loc.y - radius; y < this.loc.y + radius; y+=2) {
+        let position = {x:x,y:y,z:0};
+        let threat = this.threat_at_position(this.team, position);
+        positions.push({pos: position, score: threat});
+      }
+    }
+
+    positions.sort((a,b) => {
+      return b.score - a.score;
+    });
+
+    let movement = this.attributes.get_attr("movement") ?? 25;
+    
+    // lower movement means more deviation
+    // maximum randomness = 0.5
+    // minimum randomness = 0.1
+
+    let randomness = 0.5 - (movement / 100) * 0.4;
+    let index = Math.floor(Math.random() * randomness * 10);
+
+    let target = positions[index].pos;
+    // average of midpoint and target with zone bias
+    target.x = (target.x + midpoint.x * zone_bias) / (1 + zone_bias);
+    target.y = (target.y + midpoint.y * zone_bias) / (1 + zone_bias);
     return target;
+    
   }
 
   kickoff_position() {
@@ -442,7 +512,11 @@ export class PlayerOnPitch extends Player {
       this.dy -= max_acceleration / 360;
     }
 
-    
+    // if at target, decelerate and stop
+    if (dist(this.loc, target) < 0.5) {
+      this.dx = 0;
+      this.dy = 0;
+    }
 
 
   }
@@ -547,6 +621,7 @@ export class PlayerOnPitch extends Player {
     // max speed = 25 m/s
     // min speed = 15 m/s
     // optimal speed is one that takes 1 second to reach target
+    // player w/ better technique will apply speed closer to optimal speed
 
     let max_speed = 15 + (pass_accuracy / 100) * 10;
     let speed = max_speed;
@@ -679,7 +754,7 @@ export class PlayerOnPitch extends Player {
     // randomly move around in small radius around current location
 
 
-    let radius = 0.05;
+    let radius = 0.025;
     let x = this.loc.x + (Math.random() - 0.5) * radius;
     let y = this.loc.y + (Math.random() - 0.5) * radius;
 
@@ -987,6 +1062,10 @@ export class Match {
       ...this.away.playersOnPitch,
     ];
 
+    this.playersOnPitch.forEach((player) => {
+      player.calculate_pitch_zone_scores();
+    });
+
     this.stat = new Stat(this);
 
     this.background = new OffscreenCanvas(900, 900);
@@ -1187,8 +1266,6 @@ export class Match {
     } else if (this.ball_dy < 0) {
       this.ball_dy += a_y / 60;
     }
-    console.log(this.ball_dz);
-    console.log(this.ball_pos.z);
 
     if (this.ball_dz > 0) {
       this.ball_dz -= a_z / 60;
@@ -1278,11 +1355,13 @@ export class Match {
     requestAnimationFrame(() => {
       let ctx = this.foreground?.getContext("2d");
       if (this.foreground) {
-        let length = this.background.width;
-        let width = this.background.height;
+        
+        const pitchOffset = 50;
+        let length = this.background.width - 2 * pitchOffset;
+        let width = this.background.height - 2 * pitchOffset;
         this.home.playersOnPitch.forEach((player) => {
-          let x = (player.loc.x / this.venue.length) * length;
-          let y = (player.loc.y / this.venue.width) * width;
+          let x = (player.loc.x / this.venue.length) * length + pitchOffset;
+          let y = (player.loc.y / this.venue.width) * width + pitchOffset;
           if (ctx) {
             ctx.fillStyle = "black";
             ctx.beginPath();
@@ -1296,8 +1375,8 @@ export class Match {
           }
         });
         this.away.playersOnPitch.forEach((player) => {
-          let x = (player.loc.x / this.venue.length) * length;
-          let y = (player.loc.y / this.venue.width) * width;
+          let x = (player.loc.x / this.venue.length) * length + pitchOffset;
+          let y = (player.loc.y / this.venue.width) * width + pitchOffset;
           if (ctx) {
             ctx.fillStyle = "white";
             ctx.beginPath();

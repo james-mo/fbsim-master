@@ -1,7 +1,7 @@
 import { Match, Team, PlayerOnPitch } from "./game";
 import { SimMatch } from "./sim_game";
 import { Player, Position, Role } from "./person";
-import { City, Country, PitchDimensions, Venue } from "./place";
+import { City, Country, PitchDimensions, PitchZone, Venue } from "./place";
 import { Attribute, OutfieldAttribute, Attributes } from "./person";
 import { meters_to_px } from "../common/helpers";
 import { DateTime } from "luxon";
@@ -92,6 +92,8 @@ for (let i = 0; i < 22; i++) {
     }
   }
 }
+
+console.log(PitchZone.get_coords(21));
 
 venue.init_pitch_dimensions();
 
@@ -261,6 +263,30 @@ export function draw_pitch(canvas: OffscreenCanvas) {
       pen_radius
     );
     ctx.stroke();
+
+    // draw outlines around pitch zones
+    ctx.strokeStyle = "black";
+    ctx.lineWidth = 1;
+    for (let i = 0; i < venue.dimensions.zones.length; i++) {
+      const zone = venue.dimensions.zones[i];
+      let x = meters_to_px(zone.rect.point_1.x, venue.dimensions.length, length);
+      let y = meters_to_px(zone.rect.point_1.y, venue.dimensions.width, width);
+      let w = meters_to_px(zone.rect.point_2.x - zone.rect.point_1.x, venue.dimensions.length, length);
+      let h = meters_to_px(zone.rect.point_2.y - zone.rect.point_1.y, venue.dimensions.width, width);
+      ctx.beginPath();
+      ctx.rect(x+50, y+50, w, h);
+      ctx.stroke();
+
+      // draw the number of the zone in the middle
+      ctx.fillStyle = "black";
+      ctx.font = "12px Arial";
+      ctx.fillText(
+        i.toString(),
+        x + w / 2 + 50,
+        y + h / 2 + 50
+      );
+
+    }
   }
 }
 
@@ -269,5 +295,6 @@ match.away = team2;
 match.play();
 
 import { PitchArea } from "../common/types";
+import { watch } from "fs";
 //let areas = new PitchArea();
 //let gk_area = PitchArea.
