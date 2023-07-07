@@ -1,5 +1,7 @@
 # fbsim-master
 
+View live demo at [https://james-mo.github.io/fbsim-master/](https://james-mo.github.io/fbsim-master/)
+
 ## Development
 Install [yarn](https://yarnpkg.com/getting-started/install).
 
