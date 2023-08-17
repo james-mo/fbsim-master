@@ -551,88 +551,45 @@ export class PlayerOnPitch extends Player {
 
   pass(team: Team, opp: Team) {
     let target = this.choose_pass_target(team, opp);
+    this.m.ball_target = target.loc;
     target.receive_pass = true;
     // passing accuracy
     let pass_accuracy = this.attributes.get_attr("passing");
     if (pass_accuracy == undefined) {
       pass_accuracy = 25;
     }
-    // distance to target
-    let d = dist(this.loc, target.loc);
-    let target_coords: Coords = {
-      x: target.loc.x,
-      y: target.loc.y,
-      z: target.loc.z,
-    };
-    this.m.ball_target = target_coords;
-    // choose whether to lob or pass on ground
-    let lob = false;
-    if (d > 20) {
-      // lob
-      lob = true;
+    // max passing accuracy of 100 passing player = 90%
+    // max passing accuracy of 0 passing player = 70%
+    let max_pass_accuracy = 70 + (pass_accuracy / 100) * 20;
+    let dist_x = target.loc.x - this.loc.x;
+    let dist_y = target.loc.y - this.loc.y;
+
+    // figure out how much power is needed
+    // maximum kick speed = 30 m/s for player with 100 technique and 100 strength
+    // minimum max kick speed = 20 m/s for player with 0 technique and 0 strength
+    let kick_speed = 20 + (this.attributes.get_attr("technique") / 100) * 10;
+    kick_speed += (this.attributes.get_attr("strength") / 100) * 10;
+
+    // check if pass with max power with 0 z velocity will reach target
+    let goal = target.loc;
+    // check where pass with max power will end up
+    let dx = ((goal.x - this.loc.x) / dist(this.loc, goal)) * kick_speed;
+    let dy = ((goal.y - this.loc.y) / dist(this.loc, goal)) * kick_speed;
+    let dz = 0;
+    // check if pass will reach target
+    let i = 0;
+    while (i < 180 && !this.simulate_pass(this.loc, dx, dy, dz, goal)) {
+      dz += 0.5;
+      i++;
     }
 
-    let cross = false;
-    // if passer in crossing zone and target in box, cross
-    let direction = team.attacking_direction;
-    if (direction == "left") {
-      if (
-        (this.loc.x < 20 &&
-          this.loc.y <
-            this.venue.width / 2 + PitchDimensions.penalty_area_width / 2) ||
-        this.loc.y >
-          this.venue.width / 2 - PitchDimensions.penalty_area_width / 2
-      ) {
-        // if target in box
-        if (
-          target.loc.x < 11 &&
-          target.loc.y >
-            this.venue.width / 2 - PitchDimensions.penalty_area_width / 3 &&
-          target.loc.y <
-            this.venue.width / 2 + PitchDimensions.penalty_area_width / 3
-        ) {
-          cross = true;
-        }
-      }
-    } else if (direction == "right") {
-      if (
-        (this.loc.x > this.venue.length - 20 &&
-          this.loc.y <
-            this.venue.width / 2 + PitchDimensions.penalty_area_width / 2) ||
-        this.loc.y >
-          this.venue.width / 2 - PitchDimensions.penalty_area_width / 2
-      ) {
-        // if target in box
-        if (
-          target.loc.x > this.venue.length - 11 &&
-          target.loc.y >
-            this.venue.width / 2 - PitchDimensions.penalty_area_width / 3 &&
-          target.loc.y <
-            this.venue.width / 2 + PitchDimensions.penalty_area_width / 3
-        ) {
-          cross = true;
-        }
-      }
-    }
+    // apply error based on pass accuracy
+    let error = (100 - pass_accuracy) / 100;
+    dx += (Math.random() - 0.5) * error;
+    dy += (Math.random() - 0.5) * error;
+    dz += (Math.random() - 0.5) * error;
 
-    //calculate accuracy
-    //apply error to target_coords based on passing accuracy and distance
-    // worse passing accuracy means a larger error radius
-    // max radius: 2m
-    // min radius: .35m
-    let error_radius = 0.35 + (pass_accuracy / 100) * 1.65;
-    // pick random point in the circle
-    let r = Math.random() * error_radius;
-    let theta = Math.random() * 2 * Math.PI;
-    target_coords.x += r * Math.cos(theta);
-    target_coords.y += r * Math.sin(theta);
-
-    // caluclate speed to apply to ball
-    // better passing and technique means faster pass
-    // max speed = 25 m/s
-    // min speed = 15 m/s
-    // optimal speed is one that takes 1 second to reach target
-    // player w/ better technique will apply speed closer to optimal speed
+    this.attempt_pass(dx, dy, dz);
 
     let max_speed = 15 + (pass_accuracy / 100) * 10;
     let speed = max_speed;
