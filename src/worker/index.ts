@@ -289,12 +289,9 @@ export function draw_pitch(canvas: OffscreenCanvas) {
     }
   }
 }
-
 match.home = team1;
 match.away = team2;
 match.play();
 
-import { PitchArea } from "../common/types";
-import { watch } from "fs";
 //let areas = new PitchArea();
 //let gk_area = PitchArea.

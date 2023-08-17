@@ -122,7 +122,30 @@ export class PlayerOnPitch extends Player {
   }
 
   calculate_pitch_zone_scores() {
-    this.pitchZoneScores = PitchZone.get_score(this.position, this.team.attacking_direction);
+    let side: "left" | "right";
+    if (this.team.attacking_direction === "left") {
+      side = "right";
+    } else {
+      side = "left";
+    }
+    this.pitchZoneScores = PitchZone.get_score(this.position, side);
+  }
+
+  get_zone_midpoint(): Coords {
+    let midpoint = {x:0,y:0,z:0};
+    let total = 0;
+    for (let i = 0; i < this.pitchZoneScores.length; i++) {
+      let coords = PitchZone.get_coords(i);
+      if(this.pitchZoneScores[i] > 0) {
+        midpoint.x += coords.x * this.pitchZoneScores[i];
+        midpoint.y += coords.y * this.pitchZoneScores[i];
+        total += this.pitchZoneScores[i];
+      }
+    }
+    midpoint.x /= total;
+    midpoint.y /= total;
+
+    return midpoint;
   }
 
   calculate_optimal_position(teamInPossession: Team|null) {
@@ -177,18 +200,7 @@ export class PlayerOnPitch extends Player {
     return target;*/
 
     //calculate midpoint of zone scores
-    let midpoint = {x:0,y:0,z:0};
-    let total = 0;
-    for (let i = 0; i < this.pitchZoneScores.length; i++) {
-      let coords = PitchZone.get_coords(i);
-      if(this.pitchZoneScores[i] > 0) {
-        midpoint.x += coords.x * this.pitchZoneScores[i];
-        midpoint.y += coords.y * this.pitchZoneScores[i];
-        total += this.pitchZoneScores[i];
-      }
-    }
-    midpoint.x /= total;
-    midpoint.y /= total;
+    let midpoint = this.get_zone_midpoint();
 
     let zone_bias = 0;
     if (this.m.possession == this.team) {
@@ -229,8 +241,9 @@ export class PlayerOnPitch extends Player {
     
   }
 
-  kickoff_position() {
-    return 0;
+  kickoff_position(): Coords {
+    let pos = this.get_zone_midpoint();
+    return pos;
   }
 
   dribble() {
@@ -359,9 +372,6 @@ export class PlayerOnPitch extends Player {
     let dx = ((target.x - this.loc.x) / distance) * speed;
     let dy = ((target.y - this.loc.y) / distance) * speed;
     let dz = ((target.z - this.loc.z) / distance) * speed;
-    dx /= 60;
-    dy /= 60;
-    dz /= 60;
 
     this.attempt_shot(dx, dy, dz);
 
@@ -382,7 +392,7 @@ export class PlayerOnPitch extends Player {
         this.get_ball(m);
       } else {
         if (this.receive_pass) {
-          this.move_to(m.ball_pos, 'max');
+          this.move_to(m.ball_target, 'max');
         }
         else {
           this.target_loc = this.calculate_optimal_position(m.outOfPossession);
@@ -403,23 +413,24 @@ export class PlayerOnPitch extends Player {
           return player != this;
         })) {
           let threat = p.calculate_threat(this.team);
-          let pressure = p.calculate_pressure(m.outOfPossession as Team);
+          //let pressure = p.calculate_pressure(m.outOfPossession as Team);
           teammate_threat[this.team.playersOnPitch.indexOf(p)] = threat;
-          teammate_pressure[this.team.playersOnPitch.indexOf(p)] = pressure;
-          diff[this.team.playersOnPitch.indexOf(p)] = (threat - pressure)*.75;
+          //teammate_pressure[this.team.playersOnPitch.indexOf(p)] = pressure;
+          //diff[this.team.playersOnPitch.indexOf(p)] = (threat - pressure)*.75;
         }
 
         let self_threat = this.calculate_threat(this.team);
-        let self_pressure = this.calculate_pressure(m.outOfPossession as Team);
-        let self_diff = self_threat - self_pressure;
-        let max_diff = Math.max(...diff);
-        if (max_diff > self_diff) {
+        //let self_pressure = this.calculate_pressure(m.outOfPossession as Team);
+        //let self_diff = self_threat - self_pressure;
+        //let max_diff = Math.max(...diff);
+        let max_threat = Math.max(...teammate_threat);
+        if (max_threat > self_threat) {
           // pass
           this.pass(this.team, m.outOfPossession as Team);
-        } else if (self_diff > max_diff){
+        } else if (self_threat > max_threat){
           // if self diff is lower than shot threshold,
           // dribble to a more threatening position
-          if (self_diff < 0.0001) {
+          if (self_threat < 0.01) {
             this.dribble();
           }
           else {
@@ -643,12 +654,7 @@ export class PlayerOnPitch extends Player {
     let dy = ((target_coords.y - this.loc.y) / d) * speed;
     let dz = 0;
     if (lob || cross) {
-      dz = ((target_coords.z - this.loc.z) / d) * speed;
-    }
-    dx /= 60;
-    dy /= 60;
-    if (lob || cross) {
-      dz /= 60;
+      dz = ((10 - this.loc.z) / d) * speed;
     }
 
     this.attempt_pass(dx, dy, dz);
@@ -663,7 +669,6 @@ export class PlayerOnPitch extends Player {
     // initially array of 10 0's
     let scores = Array(10).fill(0);
     for (let p of players) {
-      let d = dist(this.loc, p.loc);
       // normal distribution by distance
       // if team instruction is shorter passing, reduce the standard deviation
       // if team instruction is longer passing, increase the standard deviation
@@ -688,32 +693,33 @@ export class PlayerOnPitch extends Player {
       if (this.instructions.includes("longer_passing" as PlayerInstruction)) {
         std_dev = std_dev + 0.15;
       }
-      scores[players.indexOf(p)] += Math.exp(
-        (-0.5 * (d * d)) / (std_dev * std_dev)
-      );
+      //scores[players.indexOf(p)] += Math.exp(
+       // (-0.5 * (d * d)) / (std_dev * std_dev)
+      //);
 
       // players that the passer is currently facing have a higher chance of being passed to
-      let angle = Math.atan2(p.loc.y - this.loc.y, p.loc.x - this.loc.x);
-      let facing = Math.atan2(this.dy, this.dx);
-      let diff = Math.abs(angle - facing);
-      if (diff < Math.PI / 4) {
-        scores[players.indexOf(p)] += 1;
-      }
+      //let angle = Math.atan2(p.loc.y - this.loc.y, p.loc.x - this.loc.x);
+      //let facing = Math.atan2(this.dy, this.dx);
+      //let diff = Math.abs(angle - facing);
+      //if (diff < Math.PI / 4) {
+      //  scores[players.indexOf(p)] += 1;
+      //}
       // players under pressure have a lower chance of being passed to
-      let pressure = p.calculate_pressure(opp);
-      scores[players.indexOf(p)] -= pressure;
+      //let pressure = p.calculate_pressure(opp);
+      //scores[players.indexOf(p)] -= pressure;
       // players in a threatening position have a higher chance of being passed to
       let threat = p.calculate_threat(team);
       scores[players.indexOf(p)] += threat;
 
       // sort scores
-      scores.sort((a, b) => {
-        return b - a;
-      });
+      
 
     }
 
-
+    /*scores.sort((a, b) => {
+      return b - a;
+    });*/
+    //sort descending
 
     // randomly choose player
     // use decision making attribute
@@ -725,11 +731,14 @@ export class PlayerOnPitch extends Player {
       decisions = 25;
     }
 
-    // lower decisions means more deviatione
+    // lower decisions means more deviation
     // maximum randomness = 0.5
     // minimum randomness = 0.1
-    let randomness = 0.5 - (decisions / 100) * 0.4;
-    let index = Math.floor(Math.random() * randomness * 10);
+    //let randomness = 0.5 - (decisions / 100) * 0.4;
+    //let index = Math.floor(Math.random() * randomness * 10);
+
+    // get player with highest score
+    let index = scores.indexOf(Math.max(...scores));
     let target = players[index];
     return target;
   }
@@ -796,11 +805,11 @@ export class PlayerOnPitch extends Player {
     if (direction == "left") {
       //left side goal
       let d = dist(this.loc, left);
-      return 1 / (d * d);
+      return 1 / (d);
     } else {
       //right side goal
       let d = dist(this.loc, right);
-      return 1 / (d * d);
+      return 1 / (d);
     }
   }
 
@@ -834,7 +843,6 @@ export class PlayerOnPitch extends Player {
     this.target_loc =  (
       { x: 105/2, y: 68/2, z: 0 }
     );
-    this.loc = { x: 40, y: 52, z: 0 };
 
     this.dx = 0;
     this.dy = 0;
@@ -931,6 +939,8 @@ export class Match {
   foreground: HTMLCanvasElement | null;
   playersOnPitch: PlayerOnPitch[];
   stat:Stat;
+  ball_bounce:boolean;
+  ball_last_touch:Team|null;
 
   set home(home: Team) {
     this._home = home;
@@ -1003,6 +1013,7 @@ export class Match {
     this.ball_dx = 0 / 60;
     this.ball_dy = 0 / 60;
     this.ball_dz = 0;
+    this.ball_bounce = false;
 
     this.ball_target = {
       x: this.venue.dimensions.kickoff_spot.x,
@@ -1018,6 +1029,8 @@ export class Match {
       this.home.attacking_direction = "left";
       this.away.attacking_direction = "right";
     }
+
+    console.log("White team attacking direction: " + this.home.attacking_direction);
 
     this.half = 1;
 
@@ -1064,6 +1077,7 @@ export class Match {
 
     this.playersOnPitch.forEach((player) => {
       player.calculate_pitch_zone_scores();
+      player.loc = player.kickoff_position();
     });
 
     this.stat = new Stat(this);
@@ -1125,7 +1139,7 @@ export class Match {
         
     // if the ball is more than 2m away from any players,
     // possession is null
-    if (dist(closest[0].loc, this.ball_pos) > 2 && dist(closest[1].loc, this.ball_pos) > 2) {
+    if (dist(closest[0].loc, this.ball_pos) > 2 && dist(closest[1].loc, this.ball_pos) > 2 || this.ball_pos.z > 2) {
       this.player_possession = null;
       this.set_possession(null);
     }
@@ -1186,10 +1200,10 @@ export class Match {
           q.loc.y += (q.loc.y - p.loc.y) /8;
 
         }
-     }
-   }
+      }
+    }
 
-   // player can't go off the screen
+    // player can't go off the screen
     for (let p of this.playersOnPitch) {
       if (p.loc.x < 0) {
         p.loc.x = 0;
@@ -1206,91 +1220,119 @@ export class Match {
     }
 
 
-  // ball can't be inside a player
-  let ball_radius = 0.22;
-  for (let p of this.playersOnPitch) {
-    let d = dist(p.loc, this.ball_pos);
-    if (d < ball_radius) {
-      // collision
-       //move ball away from player
-      this.ball_pos.x += (this.ball_pos.x - p.loc.x) / 2;
-      this.ball_pos.y += (this.ball_pos.y - p.loc.y) / 2;
-    }
-  }
-
-  }
-
-  move_ball() {
-    this.ball_pos.x += this.ball_dx;
-    this.ball_pos.y += this.ball_dy;
-    this.ball_pos.z += this.ball_dz;
-
-    // calculate decelration
-    // mass = 0.43 kg
-    // friction coefficient = 0.03
-    // f_friction = 0.03 * 0.43 kg * 9.81 m/s/s = 0.01265 kg m/s/s
-    // f_drag = 0.5 * 0.03 * pi*(0.11m)^2 * 1.2 kg/m^3 * velocity^2
-    // velocity = dx * 60 + dy * 60 + dz * 60 (m/s)
-    // f_total = f_friction + f_drag
-    // a = f_total / mass
-
-    let f_friction = 0.01265;
-
-    let f_drag_x = 0.5 * 0.03 * Math.PI * 0.11 * 0.11 * 1.2 * this.ball_dx*this.ball_dx;
-    let f_drag_y = 0.5 * 0.03 * Math.PI * 0.11 * 0.11 * 1.2 * this.ball_dy*this.ball_dy;
-    let f_drag_z = 0.5 * 0.03 * Math.PI * 0.11 * 0.11 * 1.2 * this.ball_dz*this.ball_dz;
-    if (this.ball_pos.z > 0) {
-      f_friction = 0;
-    }
-    let f_total_x = f_friction + f_drag_x;
-    let f_total_y = f_friction + f_drag_y;
-    let f_total_z = f_drag_z;
-    let a_x = f_total_x / 0.43;
-    let a_y = f_total_y / 0.43;
-    let a_z = (9.81) - f_total_z / 0.43;
-
-    // calculate new velocity
-    // v = u + at
-    // u = v - at
-    // v = 0
-    // t = 1/60
-
-    //apply a to dx, dy, dz
-    if (this.ball_dx > 0) {
-      this.ball_dx -= a_x / 60;
-    } else if (this.ball_dx < 0) {
-      this.ball_dx += a_x / 60;
-    }
-    if (this.ball_dy > 0) {
-      this.ball_dy -= a_y / 60;
-    } else if (this.ball_dy < 0) {
-      this.ball_dy += a_y / 60;
-    }
-
-    if (this.ball_dz > 0) {
-      this.ball_dz -= a_z / 60;
-    } else if (this.ball_dz <= 0) {
-      // check if need to bounce
-      if (this.ball_pos.z < .16) {
-        this.ball_pos.z = 0;
-        this.ball_dz = -this.ball_dz;
+    // ball can't be inside a player
+    let ball_radius = 0.22;
+    for (let p of this.playersOnPitch) {
+      let d = dist(p.loc, this.ball_pos);
+      if (d < ball_radius) {
+        // collision
+        //move ball away from player
+        this.ball_pos.x += (this.ball_pos.x - p.loc.x) / 2;
+        this.ball_pos.y += (this.ball_pos.y - p.loc.y) / 2;
       }
     }
 
+    // check if the ball crosses the touch line
+    if (this.ball_pos.x < 0) {
+      // check if it crosses the goal line
+      if (this.ball_pos.y > this.venue.width/2 - 7.32/2 && this.ball_pos.y < this.venue.width/2 + 7.32/2) {
+        // goal
+        let team_scored:Team;
+        if (this.home.attacking_direction=="left") {
+          team_scored = this.home;
+        }
+        else {
+          team_scored = this.away;
+        }
+        this.goal(team_scored);
+      }
+      else {
+        if (this.home.attacking_direction=="left") {
+          if (this.ball_last_touch == this.away) {
+            // corner
+            // side of the pitch
+            if (this.ball_pos.y > this.venue.width/2) {
+              this.corner(this.home, "right");
+            }
+            else {
+              this.corner(this.home, "left");
+            }
+          }
+          else {
+            // goal kick
+            this.goal_kick(this.away);
+          }
+        }
+        else {
+          if (this.ball_last_touch == this.home) {
+            // corner
+            // side of the pitch
+            if (this.ball_pos.y > this.venue.width/2) {
+              this.corner(this.away, "right");
+            }
+            else {
+              this.corner(this.away, "left");
+            }
+          }
+          else {
+            // goal kick
+            this.goal_kick(this.home);
+          }
+        }
+      }
+    }
+  }
+
+  goal(team:Team) {
+    this.ball_pos = {
+      x: this.venue.length/2,
+      y: this.venue.width/2,
+      z: 0
+    };
+    if (team == this.home) {
+      this.home_goals++;
+    }
+    else {
+      this.away_goals++;
+    }
+    this.ball_last_touch = null;
+    this.do_kickoff();
+  }
+
+  move_ball() {
+    this.ball_pos.x += this.ball_dx/60;
+    this.ball_pos.y += this.ball_dy/60;
+    this.ball_pos.z += this.ball_dz/60;
+    const restitution = 0.8;
+    let a_z = -9.81;
+    let air_density = 1.2;
+    let drag_coefficient = 0.47;
+    let area = Math.PI * 0.11 * 0.11;
+    let velocity = Math.sqrt(this.ball_dx*this.ball_dx + this.ball_dy*this.ball_dy);
+    let a_x = -0.5 * air_density * drag_coefficient * area * velocity * this.ball_dx;
+    let a_y = -0.5 * air_density * drag_coefficient * area * velocity * this.ball_dy;
+    if (this.ball_pos.z > 0) {
+      if (this.ball_pos.z > 0.25) {
+        this.ball_bounce = true;
+      }
+      a_z += -0.5 * air_density * drag_coefficient * area * velocity * this.ball_dz;
+      this.ball_dz += a_z/60;
+      this.ball_dx = Math.sign(this.ball_dx) * Math.sqrt(this.ball_dx*this.ball_dx + a_x/60);
+      this.ball_dy = Math.sign(this.ball_dy) * Math.sqrt(this.ball_dy*this.ball_dy + a_y/60);
+    }
+    else {
+      let friction = 0.007;
+      this.ball_dx -= friction*this.ball_dx;
+      this.ball_dy -= friction*this.ball_dy;
+      this.ball_dx += a_x/60;
+      this.ball_dy += a_y/60;
+      if (this.ball_bounce) {
+        this.ball_dz = -this.ball_dz * 0.8;
+        this.ball_bounce = false;
+      }
+    }
     
 
-
-    // if velocity is too small, set to 0
-
-    if (this.ball_dx < 0.02 && this.ball_dx > -0.02) {
-      this.ball_dx = 0;
-    }
-    if (this.ball_dy < 0.02 && this.ball_dy > -0.02) {
-      this.ball_dy = 0;
-    }
-    if (this.ball_dz < 0.02 && this.ball_dz > -0.02) {
-      this.ball_dz = 0;
-    }
   }
 
   move_players() {
@@ -1315,17 +1357,19 @@ export class Match {
     requestAnimationFrame(() => {
       let ctx = this.foreground?.getContext("2d");
       if (this.foreground) {
+
+        const pitchOffset = 50;
         if (ctx) {
-          let length = this.background.width;
-          let width = this.background.height;
+          let length = this.background.width - 2 * pitchOffset;
+          let width = this.background.height - 2 * pitchOffset;
           if (ctx) {
-            let x = (this.ball_pos.x / this.venue.length) * length;
-            let y = (this.ball_pos.y / this.venue.width) * width;
+            let x = (this.ball_pos.x / this.venue.length) * length + pitchOffset;
+            let y = (this.ball_pos.y / this.venue.width) * width + pitchOffset;
 
             // if z is larger than the radius should be larger
             let radius = 3.4;
             if (this.ball_pos.z > 0) {
-              radius += this.ball_pos.z*2;
+              radius += this.ball_pos.z;
             }
 
             ctx.fillStyle = "black";
@@ -1338,8 +1382,8 @@ export class Match {
             ctx.arc(x, y, radius-1, 0, 2 * Math.PI);
             ctx.fill();
 
-            let target_x = (this.ball_target.x/this.venue.length)*length;
-            let target_y = (this.ball_target.y/this.venue.width)*width;
+            let target_x = (this.ball_target.x/this.venue.length)*length + pitchOffset;
+            let target_y = (this.ball_target.y/this.venue.width)*width + pitchOffset;
 
             ctx.strokeStyle = "red";
             ctx.beginPath();
@@ -1526,15 +1570,18 @@ export class Match {
     if (team instanceof Team) {
       this.possession = team;
       this.outOfPossession = team == this.home ? this.away : this.home;
+      this.ball_last_touch = team;
     } else {
       this.possession = null;
       this.outOfPossession = null;
     }
   }
 
-  do_kickoff(half: boolean) {
+  do_kickoff(team?: number, half?: boolean) {
     const rand = Math.random();
-    let team = 0;
+    if (team==null) {
+      let team = 0;
+    }
     if (!half) {
       if (rand < 0.5) {
         this.set_possession(this.home);
@@ -1565,9 +1612,9 @@ export class Match {
     p1.loc.y = this.venue.dimensions.kickoff_spot.y;
     this.player_possession = p1;
     //this.player_possession.pass(t, o);
-    this.ball_dx = 1/60;
-    this.ball_dy = 1/60;
-    this.ball_dz = 60/60;
+    this.ball_dx = 1;
+    this.ball_dy = 1;
+    this.ball_dz = 0;
   }
 
   async play() {

@@ -1,4 +1,64 @@
 "use strict";
+var __awaiter = (this && this.__awaiter) || function (thisArg, _arguments, P, generator) {
+    function adopt(value) { return value instanceof P ? value : new P(function (resolve) { resolve(value); }); }
+    return new (P || (P = Promise))(function (resolve, reject) {
+        function fulfilled(value) { try { step(generator.next(value)); } catch (e) { reject(e); } }
+        function rejected(value) { try { step(generator["throw"](value)); } catch (e) { reject(e); } }
+        function step(result) { result.done ? resolve(result.value) : adopt(result.value).then(fulfilled, rejected); }
+        step((generator = generator.apply(thisArg, _arguments || [])).next());
+    });
+};
 Object.defineProperty(exports, "__esModule", { value: true });
-const sqlite3_1 = require("sqlite3");
-const db = new sqlite3_1.Database('db.sqlite');
+const client_1 = require("@prisma/client");
+const prisma = new client_1.PrismaClient();
+function main() {
+    return __awaiter(this, void 0, void 0, function* () {
+        const player = yield prisma.player.create({
+            data: {
+                name: "Lionel Messi",
+                position: {
+                    create: {
+                        name: "Right Winger",
+                    },
+                },
+                nation: {
+                    create: {
+                        name: "Argentina",
+                    },
+                },
+                club: {
+                    create: {
+                        name: "Inter Miami",
+                        venue: {
+                            create: {
+                                name: "DRV PNK Stadium",
+                                city: {
+                                    create: {
+                                        name: "Fort Lauderdale",
+                                        nation: {
+                                            create: {
+                                                name: "United States",
+                                            },
+                                        },
+                                        population: 181668,
+                                    },
+                                },
+                                capacity: 18000,
+                            },
+                        }
+                    },
+                },
+            },
+        });
+        console.log(player);
+    });
+}
+main()
+    .then(() => __awaiter(void 0, void 0, void 0, function* () {
+    yield prisma.$disconnect();
+}))
+    .catch((e) => __awaiter(void 0, void 0, void 0, function* () {
+    console.error(e);
+    yield prisma.$disconnect();
+    process.exit(1);
+}));

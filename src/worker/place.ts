@@ -242,49 +242,243 @@ export class PitchZone {
     return this._rect;
   }
 
-  static get_score(position:Position, side:'left'|'right'): number[] {
+  static get_score(position:Position, side:'left'|'right') {
     // fill array length 70 with 0s
     const zones = new Array(70).fill(0);
-    if (['Goalkeeper'].includes(position.name)) {
-      if (side=='left') {
-        zones[30] = 1;
-        zones[31] = 0.4;
-        zones[20] = 0.2;
-        zones[40] = 0.2;
-        zones[21] = 0.05;
-        zones[41] = 0.05;
-      }
-      else {
-        zones[39] = 1;
-        zones[38] = 0.4;
-        zones[49] = 0.2;
-        zones[29] = 0.2;
-        zones[48] = 0.05;
-        zones[28] = 0.05;
-      }
-    }
 
-    else if (['Left Back'].includes(position.name)) {
-      if (side=='left') {
-        zones[11] = 1;
-        zones[12] = 0.75;
-        zones[10] = 0.5;
-        zones[0] = 0.4;
-        zones[1] = 0.4;
-        zones[2] = 0.4;
-        zones[21] = 0.1;
-        zones[20] = 0.1;
-      }
-      else {
-        zones[58] = 1;
-        zones[57] = 0.75;
-        zones[59] = 0.5;
-        zones[67] = 0.4;
-        zones[68] = 0.4;
-        zones[69] = 0.4;
-        zones[48] = 0.1;
-        zones[49] = 0.1;
-      }
+    switch (position.name) {
+      case 'Goalkeeper':
+        if (side=='left') {
+          zones[30] = 1;
+          zones[31] = 0.4;
+          zones[20] = 0.2;
+          zones[40] = 0.2;
+          zones[21] = 0.05;
+          zones[41] = 0.05;
+        }
+        else {
+          zones[39] = 1;
+          zones[38] = 0.4;
+          zones[49] = 0.2;
+          zones[29] = 0.2;
+          zones[48] = 0.05;
+          zones[28] = 0.05;
+        }
+        return zones;
+
+      case 'Left Back':
+        if (side=='left') {
+          zones[11] = 1;
+          zones[12] = 0.75;
+          zones[10] = 0.5;
+          zones[0] = 0.4;
+          zones[1] = 0.4;
+          zones[2] = 0.4;
+          zones[21] = 0.1;
+          zones[20] = 0.1;
+        }
+        else {
+          zones[58] = 1;
+          zones[57] = 0.75;
+          zones[59] = 0.5;
+          zones[67] = 0.4;
+          zones[68] = 0.4;
+          zones[69] = 0.4;
+          zones[48] = 0.1;
+          zones[49] = 0.1;
+        }
+        return zones;
+
+      case 'Right Back':
+        if (side=='left') {
+          zones[51] = 1;
+          zones[52] = 0.75;
+          zones[50] = 0.5;
+          zones[60] = 0.4;
+          zones[61] = 0.4;
+          zones[62] = 0.4;
+          zones[41] = 0.1;
+          zones[40] = 0.1;
+        }
+        else {
+          zones[18] = 1;
+          zones[17] = 0.75;
+          zones[19] = 0.5;
+          zones[9] = 0.4;
+          zones[8] = 0.4;
+          zones[7] = 0.4;
+          zones[28] = 0.1;
+          zones[29] = 0.1;
+        }
+        return zones;
+
+      case 'Left Center Back':
+        if (side=='left') {
+          zones[21] = 1;
+          zones[22] = 0.75;
+          zones[31] = 0.5;
+          zones[20] = 0.5;
+          zones[30] = 0.25;
+          zones[10] = 0.25;
+        }
+        else {
+          zones[48] = 1;
+          zones[47] = 0.75;
+          zones[38] = 0.5;
+          zones[49] = 0.5;
+          zones[39] = 0.25;
+          zones[59] = 0.25;
+        }
+        return zones;
+
+      case 'Right Center Back':
+        if (side=='left') {
+          zones[41] = 1;
+          zones[42] = 0.75;
+          zones[51] = 0.5;
+          zones[40] = 0.5;
+          zones[50] = 0.25;
+          zones[30] = 0.25;
+        }
+        else {
+          zones[28] = 1;
+          zones[27] = 0.75;
+          zones[18] = 0.5;
+          zones[29] = 0.5;
+          zones[19] = 0.25;
+          zones[39] = 0.25;
+        }
+        return zones;
+      
+        case 'Defensive Midfielder':
+          if (side=='left') {
+            zones[32] = 1;
+            zones[33] = 0.75;
+            zones[22] = 0.5;
+            zones[42] = 0.5;
+            zones[23] = 0.25;
+            zones[43] = 0.25;
+            zones[21] = 0.1;
+            zones[41] = 0.1;
+            zones[31] = 0.5;
+          }
+          else {
+            zones[37] = 1;
+            zones[36] = 0.75;
+            zones[47] = 0.5;
+            zones[27] = 0.5;
+            zones[26] = 0.25;
+            zones[46] = 0.25;
+            zones[28] = 0.1;
+            zones[48] = 0.1;
+            zones[38] = 0.5;
+          }
+          return zones;
+        
+        case 'Right Central Midfielder':
+          if (side=='left') {
+            zones[43] = 1;
+            zones[44] = 0.75;
+            zones[34] = 0.5;
+            zones[54] = 0.5;
+            zones[33] = 0.25;
+            zones[53] = 0.25;
+            zones[32] = 0.1;
+            zones[42] = 0.1;
+            zones[52] = 0.1;
+          }
+          else {
+            zones[26] = 1;
+            zones[25] = 0.75;
+            zones[35] = 0.5;
+            zones[15] = 0.5;
+            zones[36] = 0.25;
+            zones[16] = 0.25;
+            zones[37] = 0.1;
+            zones[27] = 0.1;
+            zones[17] = 0.1;
+          }
+          return zones;
+        
+        case 'Left Central Midfielder':
+          if (side=='left') {
+            zones[23] = 1;
+            zones[24] = 0.75;
+            zones[34] = 0.5;
+            zones[14] = 0.5;
+            zones[33] = 0.25;
+            zones[13] = 0.25;
+            zones[32] = 0.1;
+            zones[22] = 0.1;
+            zones[12] = 0.1;
+          }
+          else {
+            zones[46] = 1;
+            zones[45] = 0.75;
+            zones[35] = 0.5;
+            zones[55] = 0.5;
+            zones[36] = 0.25;
+            zones[56] = 0.25;
+            zones[37] = 0.1;
+            zones[47] = 0.1;
+            zones[57] = 0.1;
+          }
+          return zones;
+        
+        case 'Left Winger':
+          if (side=='left') {
+            zones[14] = 1;
+            zones[13] = 0.75;
+            zones[24] = 0.5;
+            zones[4] = 0.5;
+            zones[23] = 0.25;
+            zones[3] = 0.25;
+          }
+          else {
+            zones[55] = 1;
+            zones[56] = 0.75;
+            zones[45] = 0.5;
+            zones[65] = 0.5;
+            zones[46] = 0.25;
+            zones[66] = 0.25;
+          }
+          return zones;
+        
+        case 'Right Winger':
+          if (side=='left') {
+            zones[54] = 1;
+            zones[53] = 0.75;
+            zones[44] = 0.5;
+            zones[64] = 0.5;
+            zones[43] = 0.25;
+            zones[63] = 0.25;
+          }
+          else {
+            zones[15] = 1;
+            zones[16] = 0.75;
+            zones[25] = 0.5;
+            zones[5] = 0.5;
+            zones[26] = 0.25;
+            zones[6] = 0.25;
+          }
+          return zones;
+
+        case 'Striker':
+          if (side=='left') {
+            zones[34] = 1;
+            zones[24] = 0.5;
+            zones[44] = 0.5;
+            zones[33] = 0.1;
+          }
+          else {
+            zones[35] = 1;
+            zones[25] = 0.5;
+            zones[45] = 0.5;
+            zones[36] = 0.1;
+          }
+          return zones;
+        
+      
     }
 
     return zones;

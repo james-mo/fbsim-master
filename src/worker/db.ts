@@ -1,27 +1,55 @@
-import { Database } from "sqlite3";
-const db = new Database("db.sqlite");
+import { PrismaClient } from "@prisma/client";
 
-db.run("CREATE TABLE IF NOT EXISTS clubs (id INTEGER PRIMARY KEY, name TEXT)");
-db.run("CREATE TABLE IF NOT EXISTS players (id INTEGER PRIMARY KEY, name TEXT, club_id INTEGER, FOREIGN KEY(club_id) REFERENCES clubs(id), UNIQUE(name, club_id) ON CONFLICT IGNORE)");
-//save to db file
-// path: src/local/fbsim.sqlite
+const prisma = new PrismaClient();
 
-db.run("INSERT INTO clubs (name) VALUES ('Barcelona')");
-db.run("INSERT INTO clubs (name) VALUES ('Real Madrid')");
-
-export function get_club_id(name:string) {
-  return new Promise((resolve, reject) => {
-    db.get("SELECT id FROM clubs WHERE name = ?", [name], (err, row:any) => {
-      if (err) {
-        reject(err);
-      } else {
-        resolve(row.id);
-      }
-    });
+async function main() {
+  const player = await prisma.player.create({
+    data: {
+      name: "Lionel Messi",
+      position: {
+        create: {
+          name: "Right Winger",
+        },
+      },
+      nation: {
+        create: {
+          name: "Argentina",
+        },
+      },
+      club: {
+        create: {
+          name: "Inter Miami",
+          venue: {
+            create: {
+              name: "DRV PNK Stadium",
+              city: {
+                create: {
+                  name: "Fort Lauderdale",
+                  nation: {
+                    create: {
+                      name: "United States",
+                    },
+                  },
+                  population: 181668,
+                },
+              },
+              capacity: 18000,
+            },
+          }
+        },
+      },
+    },
   });
+  console.log(player);
+
 }
 
-let barcelona = get_club_id("Barcelona");
-db.run("INSERT INTO players (name, club_id) VALUES ('Lionel Messi', ?)", [barcelona]);
-db.run("INSERT INTO players (name, club_id) VALUES ('Gerard Pique', ?)", [barcelona]);
-
+main()
+  .then(async () => {
+    await prisma.$disconnect()
+  })
+  .catch(async (e) => {
+    console.error(e)
+    await prisma.$disconnect()
+    process.exit(1)
+  })
