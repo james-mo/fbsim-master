@@ -1,0 +1,70 @@
+// This is your Prisma schema file,
+// learn more about it in the docs: https://pris.ly/d/prisma-schema
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "sqlite"
+  url      = env("DATABASE_URL")
+}
+
+model Player {
+  id         Int         @id @default(autoincrement())
+  name       String
+  attributes Attribute[]
+  nation     Nation      @relation(fields: [nationId], references: [id])
+  club       Club        @relation(fields: [clubId], references: [id])
+  position   Position    @relation(fields: [positionId], references: [id])
+  nationId   Int
+  clubId     Int
+  positionId Int
+}
+
+model Attribute {
+  name     String  @id
+  value    Int
+  Player   Player? @relation(fields: [playerId], references: [id])
+  playerId Int?
+}
+
+model Nation {
+  id         Int      @id @default(autoincrement())
+  name       String
+  population Int?
+  Player     Player[]
+  City       City[]
+}
+
+model Club {
+  id      Int      @id @default(autoincrement())
+  name    String
+  venueId Int      @unique
+  venue   Venue    @relation(fields: [venueId], references: [id])
+  Player  Player[]
+}
+
+model Position {
+  id     Int      @id @default(autoincrement()) @unique
+  name   String
+  Player Player[]
+}
+
+model Venue {
+  id       Int    @id @default(autoincrement())
+  name     String
+  capacity Int
+  cityId   Int    @unique
+  city     City   @relation(fields: [cityId], references: [id])
+  clubs    Club[]
+}
+
+model City {
+  id         Int     @id @unique @default(autoincrement())
+  name       String
+  population Int
+  nation     Nation  @relation(fields: [nationId], references: [id])
+  venues     Venue[]
+  nationId   Int
+}

@@ -17,11 +17,14 @@ class Person {
     calculate_age(now) {
         // calculate age (years and days)
         console.log(now);
-        const diff = now.diff(this._dob, ['years', 'days']);
-        return diff.years + ' years, ' + diff.days + ' days';
+        const diff = now.diff(this._dob, ["years", "days"]);
+        return diff.years + " years, " + diff.days + " days";
     }
     set nationalities(nationalities) {
         this._nationalities = nationalities;
+    }
+    get nationalities() {
+        return this._nationalities;
     }
     set place_of_birth(place_of_birth) {
         this._place_of_birth = place_of_birth;
@@ -43,11 +46,24 @@ class Person {
     }
 }
 class Attributes {
+    constructor() {
+        this._attributes = new Map();
+    }
     set attributes(attributes) {
         this._attributes = attributes;
     }
+    get attributes() {
+        return this._attributes;
+    }
     get_attr(name) {
-        return this.attributes[name];
+        let ret = this._attributes.get(name);
+        if (ret != undefined) {
+            return ret;
+        }
+        return 25;
+    }
+    set_attr(name, value) {
+        this._attributes.set(name, value);
     }
 }
 exports.Attributes = Attributes;
@@ -59,7 +75,11 @@ class Player extends Person {
         return this._attributes;
     }
     get_attribute(name) {
-        return this._attributes.get_attr(name);
+        let attr = this._attributes.get_attr(name);
+        if (typeof attr === "number") {
+            return attr;
+        }
+        return 0;
     }
     set positions(positions) {
         this._positions = positions;
