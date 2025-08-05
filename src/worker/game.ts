@@ -372,6 +372,9 @@ export class PlayerOnPitch extends Player {
     let dx = ((target.x - this.loc.x) / distance) * speed;
     let dy = ((target.y - this.loc.y) / distance) * speed;
     let dz = ((target.z - this.loc.z) / distance) * speed;
+    dx /= 60;
+    dy /= 60;
+    dz /= 60;
 
     this.attempt_shot(dx, dy, dz);
 
@@ -420,17 +423,16 @@ export class PlayerOnPitch extends Player {
         }
 
         let self_threat = this.calculate_threat(this.team);
-        //let self_pressure = this.calculate_pressure(m.outOfPossession as Team);
-        //let self_diff = self_threat - self_pressure;
-        //let max_diff = Math.max(...diff);
-        let max_threat = Math.max(...teammate_threat);
-        if (max_threat > self_threat) {
+        let self_pressure = this.calculate_pressure(m.outOfPossession as Team);
+        let self_diff = self_threat - self_pressure;
+        let max_diff = Math.max(...diff);
+        if (max_diff > self_diff) {
           // pass
           this.pass(this.team, m.outOfPossession as Team);
-        } else if (self_threat > max_threat){
+        } else if (self_diff > max_diff){
           // if self diff is lower than shot threshold,
           // dribble to a more threatening position
-          if (self_threat < 0.01) {
+          if (self_diff < 0.0001) {
             this.dribble();
           }
           else {
@@ -551,45 +553,88 @@ export class PlayerOnPitch extends Player {
 
   pass(team: Team, opp: Team) {
     let target = this.choose_pass_target(team, opp);
-    this.m.ball_target = target.loc;
     target.receive_pass = true;
     // passing accuracy
     let pass_accuracy = this.attributes.get_attr("passing");
     if (pass_accuracy == undefined) {
       pass_accuracy = 25;
     }
-    // max passing accuracy of 100 passing player = 90%
-    // max passing accuracy of 0 passing player = 70%
-    let max_pass_accuracy = 70 + (pass_accuracy / 100) * 20;
-    let dist_x = target.loc.x - this.loc.x;
-    let dist_y = target.loc.y - this.loc.y;
-
-    // figure out how much power is needed
-    // maximum kick speed = 30 m/s for player with 100 technique and 100 strength
-    // minimum max kick speed = 20 m/s for player with 0 technique and 0 strength
-    let kick_speed = 20 + (this.attributes.get_attr("technique") / 100) * 10;
-    kick_speed += (this.attributes.get_attr("strength") / 100) * 10;
-
-    // check if pass with max power with 0 z velocity will reach target
-    let goal = target.loc;
-    // check where pass with max power will end up
-    let dx = ((goal.x - this.loc.x) / dist(this.loc, goal)) * kick_speed;
-    let dy = ((goal.y - this.loc.y) / dist(this.loc, goal)) * kick_speed;
-    let dz = 0;
-    // check if pass will reach target
-    let i = 0;
-    while (i < 180 && !this.simulate_pass(this.loc, dx, dy, dz, goal)) {
-      dz += 0.5;
-      i++;
+    // distance to target
+    let d = dist(this.loc, target.loc);
+    let target_coords: Coords = {
+      x: target.loc.x,
+      y: target.loc.y,
+      z: target.loc.z,
+    };
+    this.m.ball_target = target_coords;
+    // choose whether to lob or pass on ground
+    let lob = false;
+    if (d > 20) {
+      // lob
+      lob = true;
     }
 
-    // apply error based on pass accuracy
-    let error = (100 - pass_accuracy) / 100;
-    dx += (Math.random() - 0.5) * error;
-    dy += (Math.random() - 0.5) * error;
-    dz += (Math.random() - 0.5) * error;
+    let cross = false;
+    // if passer in crossing zone and target in box, cross
+    let direction = team.attacking_direction;
+    if (direction == "left") {
+      if (
+        (this.loc.x < 20 &&
+          this.loc.y <
+            this.venue.width / 2 + PitchDimensions.penalty_area_width / 2) ||
+        this.loc.y >
+          this.venue.width / 2 - PitchDimensions.penalty_area_width / 2
+      ) {
+        // if target in box
+        if (
+          target.loc.x < 11 &&
+          target.loc.y >
+            this.venue.width / 2 - PitchDimensions.penalty_area_width / 3 &&
+          target.loc.y <
+            this.venue.width / 2 + PitchDimensions.penalty_area_width / 3
+        ) {
+          cross = true;
+        }
+      }
+    } else if (direction == "right") {
+      if (
+        (this.loc.x > this.venue.length - 20 &&
+          this.loc.y <
+            this.venue.width / 2 + PitchDimensions.penalty_area_width / 2) ||
+        this.loc.y >
+          this.venue.width / 2 - PitchDimensions.penalty_area_width / 2
+      ) {
+        // if target in box
+        if (
+          target.loc.x > this.venue.length - 11 &&
+          target.loc.y >
+            this.venue.width / 2 - PitchDimensions.penalty_area_width / 3 &&
+          target.loc.y <
+            this.venue.width / 2 + PitchDimensions.penalty_area_width / 3
+        ) {
+          cross = true;
+        }
+      }
+    }
 
-    this.attempt_pass(dx, dy, dz);
+    //calculate accuracy
+    //apply error to target_coords based on passing accuracy and distance
+    // worse passing accuracy means a larger error radius
+    // max radius: 2m
+    // min radius: .35m
+    let error_radius = 0.35 + (pass_accuracy / 100) * 1.65;
+    // pick random point in the circle
+    let r = Math.random() * error_radius;
+    let theta = Math.random() * 2 * Math.PI;
+    target_coords.x += r * Math.cos(theta);
+    target_coords.y += r * Math.sin(theta);
+
+    // caluclate speed to apply to ball
+    // better passing and technique means faster pass
+    // max speed = 25 m/s
+    // min speed = 15 m/s
+    // optimal speed is one that takes 1 second to reach target
+    // player w/ better technique will apply speed closer to optimal speed
 
     let max_speed = 15 + (pass_accuracy / 100) * 10;
     let speed = max_speed;
@@ -611,7 +656,12 @@ export class PlayerOnPitch extends Player {
     let dy = ((target_coords.y - this.loc.y) / d) * speed;
     let dz = 0;
     if (lob || cross) {
-      dz = ((10 - this.loc.z) / d) * speed;
+      dz = ((target_coords.z - this.loc.z) / d) * speed;
+    }
+    dx /= 60;
+    dy /= 60;
+    if (lob || cross) {
+      dz /= 60;
     }
 
     this.attempt_pass(dx, dy, dz);
@@ -1257,39 +1307,76 @@ export class Match {
   }
 
   move_ball() {
-    this.ball_pos.x += this.ball_dx/60;
-    this.ball_pos.y += this.ball_dy/60;
-    this.ball_pos.z += this.ball_dz/60;
-    const restitution = 0.8;
-    let a_z = -9.81;
-    let air_density = 1.2;
-    let drag_coefficient = 0.47;
-    let area = Math.PI * 0.11 * 0.11;
-    let velocity = Math.sqrt(this.ball_dx*this.ball_dx + this.ball_dy*this.ball_dy);
-    let a_x = -0.5 * air_density * drag_coefficient * area * velocity * this.ball_dx;
-    let a_y = -0.5 * air_density * drag_coefficient * area * velocity * this.ball_dy;
+    this.ball_pos.x += this.ball_dx;
+    this.ball_pos.y += this.ball_dy;
+    this.ball_pos.z += this.ball_dz;
+
+    // calculate decelration
+    // mass = 0.43 kg
+    // friction coefficient = 0.03
+    // f_friction = 0.03 * 0.43 kg * 9.81 m/s/s = 0.01265 kg m/s/s
+    // f_drag = 0.5 * 0.03 * pi*(0.11m)^2 * 1.2 kg/m^3 * velocity^2
+    // velocity = dx * 60 + dy * 60 + dz * 60 (m/s)
+    // f_total = f_friction + f_drag
+    // a = f_total / mass
+
+    let f_friction = 0.01265;
+
+    let f_drag_x = 0.5 * 0.03 * Math.PI * 0.11 * 0.11 * 1.2 * this.ball_dx*this.ball_dx;
+    let f_drag_y = 0.5 * 0.03 * Math.PI * 0.11 * 0.11 * 1.2 * this.ball_dy*this.ball_dy;
+    let f_drag_z = 0.5 * 0.03 * Math.PI * 0.11 * 0.11 * 1.2 * this.ball_dz*this.ball_dz;
     if (this.ball_pos.z > 0) {
-      if (this.ball_pos.z > 0.25) {
-        this.ball_bounce = true;
-      }
-      a_z += -0.5 * air_density * drag_coefficient * area * velocity * this.ball_dz;
-      this.ball_dz += a_z/60;
-      this.ball_dx = Math.sign(this.ball_dx) * Math.sqrt(this.ball_dx*this.ball_dx + a_x/60);
-      this.ball_dy = Math.sign(this.ball_dy) * Math.sqrt(this.ball_dy*this.ball_dy + a_y/60);
+      f_friction = 0;
     }
-    else {
-      let friction = 0.007;
-      this.ball_dx -= friction*this.ball_dx;
-      this.ball_dy -= friction*this.ball_dy;
-      this.ball_dx += a_x/60;
-      this.ball_dy += a_y/60;
-      if (this.ball_bounce) {
-        this.ball_dz = -this.ball_dz * 0.8;
-        this.ball_bounce = false;
+    let f_total_x = f_friction + f_drag_x;
+    let f_total_y = f_friction + f_drag_y;
+    let f_total_z = f_drag_z;
+    let a_x = f_total_x / 0.43;
+    let a_y = f_total_y / 0.43;
+    let a_z = (9.81) - f_total_z / 0.43;
+
+    // calculate new velocity
+    // v = u + at
+    // u = v - at
+    // v = 0
+    // t = 1/60
+
+    //apply a to dx, dy, dz
+    if (this.ball_dx > 0) {
+      this.ball_dx -= a_x / 60;
+    } else if (this.ball_dx < 0) {
+      this.ball_dx += a_x / 60;
+    }
+    if (this.ball_dy > 0) {
+      this.ball_dy -= a_y / 60;
+    } else if (this.ball_dy < 0) {
+      this.ball_dy += a_y / 60;
+    }
+
+    if (this.ball_dz > 0) {
+      this.ball_dz -= a_z / 60;
+    } else if (this.ball_dz <= 0) {
+      // check if need to bounce
+      if (this.ball_pos.z < .16) {
+        this.ball_pos.z = 0;
+        this.ball_dz = -this.ball_dz;
       }
     }
+
     
 
+
+    // if velocity is too small, set to 0
+
+    if (this.ball_dx < 0.02 && this.ball_dx > -0.02) {
+      this.ball_dx = 0;
+    }
+    if (this.ball_dy < 0.02 && this.ball_dy > -0.02) {
+      this.ball_dy = 0;
+    }
+    if (this.ball_dz < 0.02 && this.ball_dz > -0.02) {
+      this.ball_dz = 0;
+    }
   }
 
   move_players() {
@@ -1326,7 +1413,7 @@ export class Match {
             // if z is larger than the radius should be larger
             let radius = 3.4;
             if (this.ball_pos.z > 0) {
-              radius += this.ball_pos.z;
+              radius += this.ball_pos.z*2;
             }
 
             ctx.fillStyle = "black";
