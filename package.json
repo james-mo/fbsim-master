@@ -3,19 +3,24 @@
   "license": "MIT",
   "packageManager": "yarn@3.6.0",
   "scripts": {
+    "build": "gulp build",
+    "watch": "gulp watch",
+    "serve": "node serve.js",
+    "start": "npm run build && npm run serve",
     "dev": "ts-node ./src/index.ts",
+    "simulate": "ts-node src/worker/simulate_headless.ts",
     "pretty": "yarn prettier --write ."
   },
   "dependencies": {
     "@prisma/client": "5.0.0",
     "@types/express": "^4.17.17",
-    "@types/node": "^20.3.1",
     "express": "^4.18.2",
     "luxon": "^3.3.0",
     "typescript": "^5.1.3"
   },
   "devDependencies": {
     "@types/luxon": "^3.3.0",
+    "@types/node": "^26.1.0",
     "browserify": "^17.0.0",
     "fancy-log": "^2.0.0",
     "gulp": "^4.0.2",

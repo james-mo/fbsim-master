@@ -21,7 +21,7 @@ export class SimMatch {
 
   playersOnPitch: PlayerOnPitch[] = [];
 
-  stat: Stat = new Stat(this);
+  stat: Stat;
 
   p: PlayerOnPitch | null = null;
 
@@ -29,7 +29,7 @@ export class SimMatch {
     this.playersOnPitch = this.home.playersOnPitch.concat(
       this.away.playersOnPitch
     );
-    
+    this.stat = new Stat(this);
   }
 
   async play() {
@@ -173,7 +173,7 @@ export class SimMatch {
       if (pass < passing) {
         // successful pass
         await this.log(`Successful pass to ${target.name}`);
-        this.stat.record("passes_successful", p);
+        this.stat.record("passes_completed", p);
         this.p = target;
         return;
       }

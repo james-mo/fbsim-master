@@ -9,9 +9,7 @@ import {
 } from "./person";
 import { PitchDimensions, PitchZone, Venue } from "./place";
 import { Coords, PitchArea, Polygon } from "../common/types";
-import { DateTime } from "luxon";
-import { draw_pitch } from "./index";
-import { dist, in_range, meters_to_px, rand_in_range } from "../common/helpers";
+import { dist, rand_in_range } from "../common/helpers";
 import { SimMatch } from "./sim_game";
 
 type PlayerStats = {
@@ -40,6 +38,68 @@ type PlayerStats = {
   xA: number;
 };
 
+// how valuable/dangerous a position is, as a function of proximity and
+// centrality relative to the goal being attacked. Shared by passing,
+// shooting, and dribbling decisions so they're all pulling toward the same
+// idea of "a genuinely threatening position" rather than each computing
+// their own notion of "progress" independently — a plain distance-based
+// "closer than before" metric lets the ball circulate forever without ever
+// actually threatening goal, since someone is nearly always marginally
+// closer than the passer even deep in a team's own half.
+function threat_value(loc: Coords, attacking_goal: Coords): number {
+  let dx = loc.x - attacking_goal.x;
+  let dy = loc.y - attacking_goal.y;
+  let distance = Math.sqrt(dx * dx + dy * dy);
+  let centrality = 1 / (1 + Math.abs(dy) / 12);
+  let proximity = 1 / (1 + distance / 22);
+  return centrality * proximity;
+}
+
+// how likely a pass along the straight line from `from` to `to` is to run
+// into an opponent — the passing/shooting-target scoring used to judge a
+// receiver purely by how open *they* were standing, with no regard for
+// whether an opponent was sitting in the direct path the ball has to
+// travel to reach them, so a well-marked-looking pass could still be lofted
+// straight into a defender's feet along the way. Sums contributions from
+// every opponent near the lane (not just the closest one), since two
+// defenders loosely covering a passing lane are a bigger risk than one.
+function interception_risk(from: Coords, to: Coords, opponents: PlayerOnPitch[]): number {
+  let lane_length_sq = (to.x - from.x) ** 2 + (to.y - from.y) ** 2 || 1;
+  let risk = 0;
+  for (let opp of opponents) {
+    let t = ((opp.loc.x - from.x) * (to.x - from.x) + (opp.loc.y - from.y) * (to.y - from.y)) / lane_length_sq;
+    t = Math.max(0, Math.min(1, t));
+    let closest: Coords = {
+      x: from.x + t * (to.x - from.x),
+      y: from.y + t * (to.y - from.y),
+      z: 0,
+    };
+    let d = dist(opp.loc, closest);
+    let intercept_radius = 4;
+    if (d < intercept_radius) {
+      risk += (intercept_radius - d) / intercept_radius;
+    }
+  }
+  return risk;
+}
+
+// how tightly marked an arbitrary point is — the same falloff model as
+// PlayerOnPitch.calculate_pressure, generalized to any location (not just
+// a player's actual current spot) so candidate receiving positions can be
+// evaluated without having to move the player there first
+function pressure_at(loc: Coords, opponents: PlayerOnPitch[]): number {
+  let pressure = 0;
+  for (let p of opponents) {
+    let d = dist(loc, p.loc);
+    if (d < 10) {
+      if (d == 0) {
+        d = 0.1;
+      }
+      pressure += 1 / (d * d);
+    }
+  }
+  return pressure;
+}
 
 export class PlayerOnPitch extends Player {
   _role: Role;
@@ -53,6 +113,8 @@ export class PlayerOnPitch extends Player {
   team:Team;
   receive_pass: boolean;
   _zones: number[];
+  run_ticks_remaining: number;
+  dribble_commit_ticks: number;
 
   target_speed: number;
   target_loc: Coords;
@@ -149,96 +211,165 @@ export class PlayerOnPitch extends Player {
   }
 
   calculate_optimal_position(teamInPossession: Team|null) {
-    // move towards more threatening positions
-    // or provide passing options
-    
-    // iterate through positions in radius
-    // pick one based on movement attribute
-    // and team tactics
+    // goalkeepers don't hold a formation anchor — they shuffle along the
+    // goal line tracking the ball to narrow the angle, and step out a
+    // little further as the danger gets closer to goal
+    if (this.position.name == "Goalkeeper") {
+      let own_goal_x = this.team.attacking_direction === "left" ? this.venue.length : 0;
+      let goal_center_y = this.venue.width / 2;
+      let max_shuffle = 4;
+      let y = goal_center_y + Math.max(
+        -max_shuffle,
+        Math.min(max_shuffle, this.m.ball_pos.y - goal_center_y)
+      );
+      let dist_to_goal_line = Math.abs(this.m.ball_pos.x - own_goal_x);
+      let step_out = Math.min(5, Math.max(0, (30 - dist_to_goal_line) / 30) * 5);
+      let x = own_goal_x + (own_goal_x == 0 ? 1 : -1) * (1 + step_out);
+      return { x, y, z: 0 };
+    }
 
-    // bias towards positions with higher zone scores
+    // formation anchor: weighted center of this player's typical zones
+    // for the side of the pitch they're currently attacking
+    let anchor = this.get_zone_midpoint();
 
-    /*let radius = 10;
-    // 10 m
-    let positions: {pos:Coords,score:number}[] = [];
-    for (let x = this.loc.x - radius; x < this.loc.x + radius; x+=2) {
-      for (let y = this.loc.y - radius; y < this.loc.y + radius; y+=2) {
-        let position = {x:x,y:y,z:0};
-        let threat = this.threat_at_position(this.team, position);
-        positions.push({pos: position, score: threat});
+    // the ball is loose more often than not for a tick or two at a time
+    // (right after every pass/shot, and while a receiver runs onto it) —
+    // treat whichever team last touched it as still "in the ascendancy"
+    // during those gaps, rather than washing out to a neutral shape
+    let effective_team = teamInPossession ?? this.m.ball_last_touch;
+
+    // shift across the pitch width toward the ball so the team holds
+    // its shape but compresses/slides as a unit
+    let width_shift = (this.m.ball_pos.y - this.venue.width / 2) * 0.15;
+
+    // shift the WHOLE team shape forward/back as a single unit, by the
+    // same amount for every player, so the defensive/midfield/attacking
+    // bands keep their natural relative spacing — blending each player's
+    // own anchor toward one shared absolute target (the previous approach)
+    // collapses everyone onto the same line instead of preserving depth
+    let attack_dir = this.team.attacking_direction === "left" ? -1 : 1;
+    let attacking_x = this.team.attacking_direction === "left" ? 0 : this.venue.length;
+    let own_goal_x = this.team.attacking_direction === "left" ? this.venue.length : 0;
+
+    // work in a "progress" coordinate: 0 = our own goal, venue.length =
+    // the goal we're attacking, regardless of which physical direction
+    // that corresponds to
+    let to_progress = (x: number) => (x - own_goal_x) * attack_dir;
+    let to_x = (progress: number) => own_goal_x + progress * attack_dir;
+
+    let ball_progress = Math.max(0, Math.min(this.venue.length, to_progress(this.m.ball_pos.x)));
+    // sit closer behind the ball in possession (compact, aggressive),
+    // further off it out of possession (deeper block, more reaction time)
+    let gap_behind_ball = effective_team == this.team ? 12 : effective_team == null ? 22 : 30;
+    let line_progress = Math.max(
+      this.venue.length * 0.12,
+      Math.min(this.venue.length * 0.62, ball_progress - gap_behind_ball)
+    );
+
+    let reference_progress = this.venue.length * 0.15; // a center-back's natural anchor depth
+    let length_shift = to_x(line_progress) - to_x(reference_progress);
+
+    // players with worse movement hold their shape less precisely
+    let movement = this.attributes.get_attr("movement");
+    let jitter = ((100 - movement) / 100) * 2;
+
+    let target: Coords = {
+      x: anchor.x + length_shift + rand_in_range(-jitter, jitter),
+      y: anchor.y + width_shift + rand_in_range(-jitter, jitter),
+      z: 0,
+    };
+
+    // the two closest outfield players step out of the line to press the
+    // ball carrier, rather than either everyone holding station or just
+    // one lone presser doing all the work — only while the opponent
+    // actually has the ball; a loose ball is handled by the separate
+    // closest-player-chases-it logic in decide_action
+    if (
+      teamInPossession != null &&
+      teamInPossession != this.team &&
+      this.position.name != "Goalkeeper"
+    ) {
+      let sorted = this.team.playersOnPitch
+        .filter((p) => p.position.name != "Goalkeeper")
+        .sort((a, b) => dist(a.loc, this.m.ball_pos) - dist(b.loc, this.m.ball_pos));
+      let rank = sorted.indexOf(this);
+      let press_pull = rank == 0 ? 0.75 : rank == 1 ? 0.4 : 0;
+      if (press_pull > 0) {
+        target.x = target.x * (1 - press_pull) + this.m.ball_pos.x * press_pull;
+        target.y = target.y * (1 - press_pull) + this.m.ball_pos.y * press_pull;
       }
     }
 
-    let zone_bias = 0.5;
-    for (let i = 0; i < this.pitchZoneScores.length; i++) {
-      if (this.pitchZoneScores[i] > 0) {
-        let zone_coords = PitchZone.get_coords(i);
-        for (let pos of positions) {
-          if (in_range(pos.pos.x, [zone_coords.x-5.25, zone_coords.x+5.25])) {
-            if (in_range(pos.pos.y, [zone_coords.y-9.714/2, zone_coords.y+9.714/2])) {
-
-            }
-          }
+    // occasionally break forward beyond the formation shape into space,
+    // when the team is attacking and this player isn't the one on the ball
+    if (
+      teamInPossession == this.team &&
+      this.m.player_possession != this &&
+      this.position.name != "Goalkeeper"
+    ) {
+      if (this.run_ticks_remaining > 0) {
+        this.run_ticks_remaining--;
+      } else {
+        let flair = this.attributes.get_attr("flair");
+        if (Math.random() < 0.03 + (flair / 100) * 0.05) {
+          this.run_ticks_remaining = 4 + Math.floor(Math.random() * 5);
         }
       }
-    }
-    
-    positions.sort((a,b) => {
-      return b.score - a.score;
-    });
-
-    let movement = this.attributes.get_attr("movement") ?? 25;
-    
-    // lower movement means more deviation
-    // maximum randomness = 0.5
-    // minimum randomness = 0.1
-
-    let randomness = 0.5 - (movement / 100) * 0.4;
-    let index = Math.floor(Math.random() * randomness * 10);
-
-    let target = positions[index].pos;
-    return target;*/
-
-    //calculate midpoint of zone scores
-    let midpoint = this.get_zone_midpoint();
-
-    let zone_bias = 0;
-    if (this.m.possession == this.team) {
-      zone_bias = 0.25;
-    } else {
-      zone_bias = 0.5;
-    }
-
-    let radius = 10;
-    // 10 m
-    let positions: {pos:Coords,score:number}[] = [];
-    for (let x = this.loc.x - radius; x < this.loc.x + radius; x+=2) {
-      for (let y = this.loc.y - radius; y < this.loc.y + radius; y+=2) {
-        let position = {x:x,y:y,z:0};
-        let threat = this.threat_at_position(this.team, position);
-        positions.push({pos: position, score: threat});
+      if (this.run_ticks_remaining > 0) {
+        let run_direction = this.team.attacking_direction === "left" ? -1 : 1;
+        target.x += run_direction * 14;
       }
+    } else {
+      this.run_ticks_remaining = 0;
     }
 
-    positions.sort((a,b) => {
-      return b.score - a.score;
-    });
+    // when off the ball with our team in possession, nudge toward a
+    // nearby spot that's actually easier to receive a pass at — less
+    // marked, with a clearer lane back to the carrier — instead of just
+    // sitting wherever team shape alone would put us regardless of
+    // whether a pass could realistically reach us there. This is what a
+    // player's own sense of "am I actually available right now" would
+    // drive: not a fixed formation slot, but a live read of marking and
+    // passing lanes.
+    let carrier = this.m.player_possession;
+    if (
+      teamInPossession == this.team &&
+      carrier != null &&
+      carrier != this &&
+      this.position.name != "Goalkeeper"
+    ) {
+      let opp_team = this.team == this.m.home ? this.m.away : this.m.home;
+      let opponents = opp_team.playersOnPitch;
+      let receivability = (loc: Coords) =>
+        pressure_at(loc, opponents) + interception_risk(carrier.loc, loc, opponents) * 0.5;
 
-    let movement = this.attributes.get_attr("movement") ?? 25;
-    
-    // lower movement means more deviation
-    // maximum randomness = 0.5
-    // minimum randomness = 0.1
+      let best = target;
+      let best_score = receivability(target);
+      let search_radius = 5;
+      let samples = 8;
+      for (let i = 0; i < samples; i++) {
+        let angle = (i / samples) * 2 * Math.PI;
+        let candidate: Coords = {
+          x: Math.min(Math.max(target.x + Math.cos(angle) * search_radius, 1), this.venue.length - 1),
+          y: Math.min(Math.max(target.y + Math.sin(angle) * search_radius, 1), this.venue.width - 1),
+          z: 0,
+        };
+        let score = receivability(candidate);
+        if (score < best_score) {
+          best_score = score;
+          best = candidate;
+        }
+      }
 
-    let randomness = 0.5 - (movement / 100) * 0.4;
-    let index = Math.floor(Math.random() * randomness * 10);
+      // a bias on top of the formation shape, not a replacement for it
+      target.x = target.x * 0.6 + best.x * 0.4;
+      target.y = target.y * 0.6 + best.y * 0.4;
+    }
 
-    let target = positions[index].pos;
-    // average of midpoint and target with zone bias
-    target.x = (target.x + midpoint.x * zone_bias) / (1 + zone_bias);
-    target.y = (target.y + midpoint.y * zone_bias) / (1 + zone_bias);
+    target.x = Math.min(Math.max(target.x, 1), this.venue.length - 1);
+    target.y = Math.min(Math.max(target.y, 1), this.venue.width - 1);
+
     return target;
-    
   }
 
   kickoff_position(): Coords {
@@ -247,14 +378,69 @@ export class PlayerOnPitch extends Player {
   }
 
   dribble() {
+    // carry the ball a clear, deliberate distance toward goal, evading
+    // the nearest defender sideways rather than backing away from them
     let dribbling = this.attributes.get_attr("dribbling");
-    if (dribbling == undefined) {
-      dribbling = 25;
+    let opp = this.m.outOfPossession as Team;
+
+    let attacking_goal: Coords = {
+      x: this.team.attacking_direction === "left" ? 0 : this.venue.length,
+      y: this.venue.width / 2,
+      z: 0,
+    };
+    let goal_dist = dist(this.loc, attacking_goal) || 1;
+    let toward_goal_x = (attacking_goal.x - this.loc.x) / goal_dist;
+    let toward_goal_y = (attacking_goal.y - this.loc.y) / goal_dist;
+
+    let nearest_opp = opp.playersOnPitch.reduce((a, b) =>
+      dist(a.loc, this.loc) < dist(b.loc, this.loc) ? a : b
+    );
+    let opp_dist = dist(this.loc, nearest_opp.loc) || 1;
+    let away_from_opp_x = (this.loc.x - nearest_opp.loc.x) / opp_dist;
+    let away_from_opp_y = (this.loc.y - nearest_opp.loc.y) / opp_dist;
+
+    // only the *sideways* component of "away from the nearest defender"
+    // — blending in the full avoidance vector could cancel out or even
+    // reverse forward progress whenever the defender happened to be
+    // roughly between the carrier and goal (exactly the common case for
+    // a covering defender), which read as "dribbling away from goal"
+    let along = away_from_opp_x * toward_goal_x + away_from_opp_y * toward_goal_y;
+    let lateral_x = away_from_opp_x - along * toward_goal_x;
+    let lateral_y = away_from_opp_y - along * toward_goal_y;
+    let lateral_norm = Math.sqrt(lateral_x * lateral_x + lateral_y * lateral_y) || 1;
+
+    let dx = toward_goal_x * 0.8 + (lateral_x / lateral_norm) * 0.35;
+    let dy = toward_goal_y * 0.8 + (lateral_y / lateral_norm) * 0.35;
+    let norm = Math.sqrt(dx * dx + dy * dy) || 1;
+
+    let carry_distance = 8;
+    let target: Coords = {
+      x: this.loc.x + (dx / norm) * carry_distance,
+      y: this.loc.y + (dy / norm) * carry_distance,
+      z: 0,
+    };
+
+    // there's no tackle/dispossession mechanic in this engine at all, so
+    // nothing else stops a dribble from just walking the ball into the
+    // keeper's hands — cap how close a dribble is allowed to carry the
+    // ball to the actual goalkeeper (not a blanket distance from goal,
+    // which was making the whole box off-limits to attacking dribbles —
+    // exactly backwards from the point of dribbling into the box at all)
+    let opp_gk = opp.playersOnPitch.find((p) => p.position.name == "Goalkeeper");
+    if (opp_gk) {
+      let min_dist_to_gk = 4;
+      let target_dist_to_gk = dist(target, opp_gk.loc) || 1;
+      if (target_dist_to_gk < min_dist_to_gk) {
+        let scale = min_dist_to_gk / target_dist_to_gk;
+        target.x = opp_gk.loc.x + (target.x - opp_gk.loc.x) * scale;
+        target.y = opp_gk.loc.y + (target.y - opp_gk.loc.y) * scale;
+      }
     }
 
-    let target = this.calculate_optimal_position(this.team);
-    this.dx = 0;
-    this.dy = 0;
+    target.x = Math.min(Math.max(target.x, 1), this.venue.length - 1);
+    target.y = Math.min(Math.max(target.y, 1), this.venue.width - 1);
+
+    this.move_to(target, dribbling > 60 ? "high" : "medium");
   }
 
   decelerate() {
@@ -299,18 +485,8 @@ export class PlayerOnPitch extends Player {
 
   shoot() {
     let shooting = this.attributes.get_attr("finishing");
-    if (shooting == undefined) {
-      shooting = 25;
-    }
-    // accuracy
-    // max accuracy_radius = 1.25m
-    // min accuracy_radius = 0.25m
-    let accuracy_radius = 1.25 - (shooting / 100) * 1;
     // power
     let technique = this.attributes.get_attr("technique");
-    if (technique == undefined) {
-      technique = 25;
-    }
     // max power = 25 m/s
     // min power = 15 m/s
     let max_power = 15 + (technique / 100) * 10;
@@ -322,11 +498,18 @@ export class PlayerOnPitch extends Player {
       y: this.venue.width / 2,
       z: 0,
     };
-    let right: Coords = { 
+    let right: Coords = {
       x: this.venue.length,
       y: this.venue.width / 2,
       z: 0,
     };
+
+    // accuracy gets sharply worse with distance — a clinical finisher is
+    // still fairly reliable close in, but even they spray long-range
+    // efforts, and a poor finisher misses the target outright fairly often
+    let distance_to_goal = dist(this.loc, direction == "left" ? left : right);
+    let base_accuracy_radius = 1.6 - (shooting / 100) * 1.2;
+    let accuracy_radius = base_accuracy_radius * (1 + distance_to_goal / 16);
 
     // choose side of goal
     let target: Coords;
@@ -365,6 +548,18 @@ export class PlayerOnPitch extends Player {
     target.y += rand_in_range(-accuracy_radius, accuracy_radius);
     target.z += rand_in_range(-accuracy_radius, accuracy_radius);
 
+    // the ball flies in a straight line at this (now jittered) aim point,
+    // so whether it's within the goal frame at aim-time is exactly
+    // whether it's "on target"
+    let on_target =
+      target.y > this.venue.width / 2 - PitchDimensions.goal_width / 2 &&
+      target.y < this.venue.width / 2 + PitchDimensions.goal_width / 2 &&
+      target.z > 0 &&
+      target.z < PitchDimensions.goal_height;
+    if (on_target) {
+      this.m.record("shots_on_target", this);
+    }
+
     // caluclate speed to apply to ball
     let speed = max_power;
     let distance = dist(this.loc, target);
@@ -384,10 +579,28 @@ export class PlayerOnPitch extends Player {
     this.m.ball_dx = dx;
     this.m.ball_dy = dy;
     this.m.ball_dz = dz;
+    // only a deliberate shot can score — an unclaimed pass/cross that
+    // happens to drift into the frame becomes a goal kick instead (see
+    // collision_detection), the same way it would be scrambled clear or
+    // gathered by the keeper in reality, rather than counting as a goal
+    this.m.ball_is_shot = true;
+    // the ball is now in flight — don't leave the shooter flagged as the
+    // carrier until possession is next resolved, or they'll immediately
+    // "receive" their own shot
+    this.m.player_possession = null;
+    this.m.set_possession(null);
+    this.dribble_commit_ticks = 0;
+    this.m.last_passer = null;
     this.m.record("shots", this);
   }
   decide_action(m:Match) {
-    // if ball is not possessed by anyone, and player is closest 
+    // a keeper holding the ball is on a hold timer managed by the match
+    // (see gk_distribute) — everyone else just carries on positioning
+    // themselves for the coming throw/punt
+    if (m.gk_holding == this) {
+      return;
+    }
+    // if ball is not possessed by anyone, and player is closest
     // teammate, try to get it
     if (m.possession == null) {
       let closest = m.closest_to_ball();
@@ -395,10 +608,12 @@ export class PlayerOnPitch extends Player {
         this.get_ball(m);
       } else {
         if (this.receive_pass) {
-          this.move_to(m.ball_target, 'max');
+          // chase the ball's live position, not the pass's original aim
+          // point, so runs onto a pass track it properly as it decelerates
+          this.move_to(m.ball_pos, 'max');
         }
         else {
-          this.target_loc = this.calculate_optimal_position(m.outOfPossession);
+          this.target_loc = this.calculate_optimal_position(m.possession);
 
           this.move_to(this.target_loc,'medium');
         }
@@ -406,51 +621,180 @@ export class PlayerOnPitch extends Player {
     } else {
       this.receive_pass = false;
       // if ball is possessed by self
-      if (m.player_possession == this) {
+      if (m.player_possession == this && this.dribble_commit_ticks > 0) {
+        // once committed to a dribble, carry on with it for a short spell
+        // instead of re-litigating shoot/pass/dribble every single decide
+        // tick (6x/second) — real players don't reconsider their options
+        // that often while already running with the ball, and not
+        // committing was inflating the number of "chances to shoot" per
+        // possession by roughly an order of magnitude
+        this.dribble_commit_ticks--;
+        this.dribble();
+      } else if (m.player_possession == this && this.position.name == "Goalkeeper") {
+        // a keeper who ends up on the ball in open play (e.g. a short
+        // goal kick that comes straight back to them) should release it
+        // immediately, not run the same shoot/dribble evaluation an
+        // outfield player would — nothing was stopping them from
+        // "dribbling" all the way into the opponent's half otherwise,
+        // since dribble() always drives toward the attacking goal
+        this.pass(this.team, m.outOfPossession as Team);
+      } else if (m.player_possession == this) {
         // dribble, pass, or shoot
-        // calculate teammate threat
-        let teammate_threat = new Array(this.team.playersOnPitch.length-1).fill(0);
-        let teammate_pressure = new Array(this.team.playersOnPitch.length-1).fill(0);
-        let diff = new Array(this.team.playersOnPitch.length-1).fill(0);
+        let opp = m.outOfPossession as Team;
+        let attacking_goal: Coords = {
+          x: this.team.attacking_direction === "left" ? 0 : this.venue.length,
+          y: this.venue.width / 2,
+          z: 0,
+        };
+        let self_dist_to_goal = dist(this.loc, attacking_goal);
+        let self_pressure = this.calculate_pressure(opp);
+        let self_value = threat_value(this.loc, attacking_goal);
+
+        // find the best-placed teammate to pass to — "best" means moving
+        // the ball to a genuinely more dangerous position (closer to and
+        // more central on goal), not just anyone marginally further
+        // forward than the passer, which lets the ball circulate forever
+        // without ever actually threatening the goal
+        let best_teammate: PlayerOnPitch | null = null;
+        let best_teammate_score = -Infinity;
         for (let p of this.team.playersOnPitch.filter((player) => {
           return player != this;
         })) {
-          let threat = p.calculate_threat(this.team);
-          //let pressure = p.calculate_pressure(m.outOfPossession as Team);
-          teammate_threat[this.team.playersOnPitch.indexOf(p)] = threat;
-          //teammate_pressure[this.team.playersOnPitch.indexOf(p)] = pressure;
-          //diff[this.team.playersOnPitch.indexOf(p)] = (threat - pressure)*.75;
+          let p_pressure = p.calculate_pressure(opp);
+          let p_value_gain = threat_value(p.loc, attacking_goal) - self_value;
+          let p_risk = interception_risk(this.loc, p.loc, opp.playersOnPitch);
+          let score = p_value_gain * 40 - p_pressure * 3 - p_risk * 8;
+          if (score > best_teammate_score) {
+            best_teammate_score = score;
+            best_teammate = p;
+          }
         }
 
-        let self_threat = this.calculate_threat(this.team);
-        let self_pressure = this.calculate_pressure(m.outOfPossession as Team);
-        let self_diff = self_threat - self_pressure;
-        let max_diff = Math.max(...diff);
-        if (max_diff > self_diff) {
-          // pass
-          this.pass(this.team, m.outOfPossession as Team);
-        } else if (self_diff > max_diff){
-          // if self diff is lower than shot threshold,
-          // dribble to a more threatening position
-          if (self_diff < 0.0001) {
+        // shots are only realistic from within range, and worse under
+        // pressure or from a shallow angle / long distance (low threat_value)
+        let shooting_range = 28;
+        let shot_score = self_dist_to_goal < shooting_range
+          ? self_value * 40 - self_pressure * 3
+          : -Infinity;
+
+        // require a genuinely better option before giving the ball up —
+        // otherwise every marginal advantage triggers an instant pass and
+        // nobody ever holds it up or carries it forward themselves. But
+        // the bar should depend on where the carrier actually is: deep in
+        // our own half, build-up play should heavily favor passing (a low
+        // bar — carrying the ball the length of the pitch alone is a rare,
+        // high-risk event in real football, not a standard way to
+        // progress), while further forward, holding the ball to
+        // manufacture a chance is a normal, valuable thing to do (a
+        // higher bar, so a marginally-better-placed teammate doesn't
+        // trigger a hasty pass in a tight area when driving at goal
+        // yourself is just as good an option). self_value already tracks
+        // how advanced the carrier is (low deep, higher approaching
+        // goal), so reuse it instead of a separate field-position notion.
+        let pass_threshold = 1 + self_value * 10;
+
+        // even when shooting is technically the best-scoring option,
+        // most "decent positions" in a real match don't actually end in
+        // a shot — a defender closes the lane, the moment passes, a
+        // better-placed teammate develops. None of that is modeled here
+        // (no line-of-sight/blocking), so approximate it with a
+        // probability of actually pulling the trigger that scales with
+        // how clear-cut the chance is, using a saturating curve on
+        // shot_score (which already folds in both proximity/centrality
+        // and pressure): a wide-open close-range chance should approach
+        // "almost always taken", while a marginal or heavily-marked
+        // "recognized" one stays rare. A power curve on self_value alone
+        // never saturated properly — even a textbook wide-open chance
+        // in the box only reached ~5%, since self_value tops out well
+        // below 1 even at point-blank range — which is what made open
+        // chances go unshot far too often.
+        let shot_openness = 1 / (1 + self_pressure);
+        // calibrated against the observed distribution of self_value at
+        // recognition time — self_value never gets remotely close to its
+        // theoretical ceiling of 1 in practice, so a curve calibrated
+        // against that ceiling instead of real data barely reaches ~20%
+        // even at the best chances a match actually produces
+        let shot_take_chance = Math.min(0.92, Math.pow(self_value, 5) * 0.045 * shot_openness);
+
+        // a genuinely clear chance — good position, essentially no one
+        // around to block it — shouldn't be a probability roll at all.
+        // Without a real hard override, a declined "clear" chance just
+        // recycles (pass back, dribble, re-approach) with the same
+        // per-cycle odds every time, which given enough cycles produces
+        // exactly the same degenerate "walk it in eventually" pattern as
+        // an unconditional dribble-toward-goal did, just spread across a
+        // few extra touches instead of one continuous run
+        // "no one around" needs to mean it literally — the weighted
+        // pressure formula can already read as very low with a defender
+        // just 6-7m away (1/d^2 falls off fast), which made this fire on
+        // a large fraction of ordinary decent positions instead of the
+        // rare genuine breakaway it's meant for
+        let nearest_opp_dist = Math.min(
+          ...opp.playersOnPitch
+            .filter((p) => p.position.name != "Goalkeeper")
+            .map((p) => dist(p.loc, this.loc))
+        );
+        let clearly_open = nearest_opp_dist > 12 && self_value > 0.55;
+        if (clearly_open) {
+          shot_take_chance = 0.95;
+        }
+
+        let shot_recognized = shot_score > 0 && shot_score > best_teammate_score;
+
+        if (shot_recognized && Math.random() < shot_take_chance) {
+          this.shoot();
+        } else if (
+          best_teammate &&
+          best_teammate_score > (shot_recognized ? -2 : pass_threshold)
+        ) {
+          // a recognized-but-declined chance should usually be recycled
+          // to a supporting teammate for a better angle, not carried
+          // even deeper — without this, a declined shot fell through to
+          // dribble() (which always drives at goal), so the player just
+          // kept re-approaching and re-rolling the same chance, walking
+          // the ball ever closer until it was essentially unmissable
+          this.pass(this.team, opp);
+        } else if (self_pressure > 1.2) {
+          // under real pressure, get rid of it even if the option isn't great
+          if (best_teammate && best_teammate_score > -2) {
+            this.pass(this.team, opp);
+          } else {
+            this.dribble_commit_ticks = 2 + Math.floor(Math.random() * 3);
             this.dribble();
           }
-          else {
-            // shoot
-            this.shoot();
-          }
-        } ;
-
+        } else {
+          this.dribble_commit_ticks = 2 + Math.floor(Math.random() * 3);
+          this.dribble();
+        }
       }
 
       else {
         // if ball is possessed by teammate
         // move to optimal position
-        let target = this.calculate_optimal_position(m.outOfPossession);
+        let target = this.calculate_optimal_position(m.possession);
         if (target==undefined) {
           target = {x:0,y:0,z:0};
         }
-        this.move_to(target,'medium');
+
+        // the closest couple of defenders should be sprinting to close
+        // the ball carrier down, not jogging at the same pace as
+        // everyone else holding formation shape — a strong target bias
+        // toward the ball doesn't mean much if they get there no faster
+        // than a player who isn't pressing at all
+        let speed: "max" | "high" | "medium" = "medium";
+        if (m.possession != this.team && this.position.name != "Goalkeeper") {
+          let sorted = this.team.playersOnPitch
+            .filter((p) => p.position.name != "Goalkeeper")
+            .sort((a, b) => dist(a.loc, m.ball_pos) - dist(b.loc, m.ball_pos));
+          let rank = sorted.indexOf(this);
+          if (rank == 0) {
+            speed = "max";
+          } else if (rank == 1) {
+            speed = "high";
+          }
+        }
+
+        this.move_to(target, speed);
 
       }
         
@@ -474,16 +818,10 @@ export class PlayerOnPitch extends Player {
 
     // calculate dx, dy, dz
     let pace = this.attributes.get_attr("pace");
-    if (pace == undefined) {
-      pace = 25;
-    }
     // max speed of 100 pace player = 10 m/s
     // max speed of 0 pace player = 7 m/s
     let max_speed = 7 + (pace / 100) * 3;
     let acceleration = this.attributes.get_attr("acceleration");
-    if (acceleration == undefined) {
-      acceleration = 25;
-    }
     if (speed == "high") {
       max_speed *= 0.85;
     }
@@ -506,38 +844,41 @@ export class PlayerOnPitch extends Player {
       max_acceleration *= 0.5;
     }
 
-    //calculate target dx and dy
-    // i.e. vectorize max_speed
-    let dx = ((target.x - this.loc.x) / dist(this.loc, target)) * max_speed;
-    let dy = ((target.y - this.loc.y) / dist(this.loc, target)) * max_speed;
+    // brake smoothly on approach instead of snapping straight to a stop
+    let d = dist(this.loc, target);
+    let approach_speed = Math.min(max_speed, d * 2);
+
+    let dx = d > 0.01 ? ((target.x - this.loc.x) / d) * approach_speed : 0;
+    let dy = d > 0.01 ? ((target.y - this.loc.y) / d) * approach_speed : 0;
 
     dx /= 60;
     dy /= 60;
 
     if (dx > this.dx) {
-      this.dx += max_acceleration / 360;
+      this.dx = Math.min(this.dx + max_acceleration / 360, dx);
     } else if (dx < this.dx) {
-      this.dx -= max_acceleration / 360;
+      this.dx = Math.max(this.dx - max_acceleration / 360, dx);
     }
     if (dy > this.dy) {
-      this.dy += max_acceleration / 360;
+      this.dy = Math.min(this.dy + max_acceleration / 360, dy);
     } else if (dy < this.dy) {
-      this.dy -= max_acceleration / 360;
+      this.dy = Math.max(this.dy - max_acceleration / 360, dy);
     }
-
-    // if at target, decelerate and stop
-    if (dist(this.loc, target) < 0.5) {
-      this.dx = 0;
-      this.dy = 0;
-    }
-
-
   }
 
   attempt_pass(dx, dy, dz) {
     this.m.ball_dx = dx;
     this.m.ball_dy = dy;
     this.m.ball_dz = dz;
+    this.m.ball_is_shot = false;
+    // the ball is now in flight — don't leave the passer flagged as the
+    // carrier, or a soft pass that hasn't traveled far by the next
+    // possession check gets reassigned right back to them and they
+    // immediately pass again
+    this.m.player_possession = null;
+    this.m.set_possession(null);
+    this.dribble_commit_ticks = 0;
+    this.m.last_passer = this;
     this.m.record("passes_attempted", this);
   }
 
@@ -622,7 +963,7 @@ export class PlayerOnPitch extends Player {
     // worse passing accuracy means a larger error radius
     // max radius: 2m
     // min radius: .35m
-    let error_radius = 0.35 + (pass_accuracy / 100) * 1.65;
+    let error_radius = 0.35 + ((100 - pass_accuracy) / 100) * 1.65;
     // pick random point in the circle
     let r = Math.random() * error_radius;
     let theta = Math.random() * 2 * Math.PI;
@@ -633,21 +974,19 @@ export class PlayerOnPitch extends Player {
     // better passing and technique means faster pass
     // max speed = 25 m/s
     // min speed = 15 m/s
-    // optimal speed is one that takes 1 second to reach target
-    // player w/ better technique will apply speed closer to optimal speed
 
     let max_speed = 15 + (pass_accuracy / 100) * 10;
-    let speed = max_speed;
 
     let distance = dist(this.loc, target_coords);
     let technique = this.attributes.get_attr("technique");
-    if (technique == undefined) {
-      technique = 25;
-    }
     let error_plus_minus_percentage = 0.15 - (technique / 100) * 0.1;
-    let optimal_speed = distance/2;
-    speed = optimal_speed * (1 + error_plus_minus_percentage * rand_in_range(-1,1));
-    
+
+    // pace scales with the player's attributes, not proportionally to
+    // distance — real passes are struck with conviction even over short
+    // distances, they just don't need full power to cover the ground
+    let base_speed = max_speed * (0.55 + Math.min(distance, 30) / 30 * 0.45);
+    let speed = base_speed * (1 + error_plus_minus_percentage * rand_in_range(-1, 1));
+
     if (speed > max_speed) {
       speed = max_speed;
     }
@@ -672,77 +1011,68 @@ export class PlayerOnPitch extends Player {
     let players = team.playersOnPitch.filter((player) => {
       return player != this;
     });
-    // target scores for each other player
-    // initially array of 10 0's
-    let scores = Array(10).fill(0);
-    for (let p of players) {
-      // normal distribution by distance
-      // if team instruction is shorter passing, reduce the standard deviation
-      // if team instruction is longer passing, increase the standard deviation
-      // if player instruction is shorter passing, reduce the standard deviation
-      // if player instruction is longer passing, increase the standard deviation
 
-      let std_dev = 1;
-      if (team.tactics.includes("shorter_passing" as TeamInstruction)) {
-        // reduce standard deviation
-        std_dev = 0.8;
-      }
-
-      if (team.tactics.includes("longer_passing" as TeamInstruction)) {
-        // increase standard deviation
-        std_dev = 1.2;
-      }
-
-      if (this.instructions.includes("shorter_passing" as PlayerInstruction)) {
-        std_dev = std_dev - 0.15;
-      }
-
-      if (this.instructions.includes("longer_passing" as PlayerInstruction)) {
-        std_dev = std_dev + 0.15;
-      }
-      //scores[players.indexOf(p)] += Math.exp(
-       // (-0.5 * (d * d)) / (std_dev * std_dev)
-      //);
-
-      // players that the passer is currently facing have a higher chance of being passed to
-      //let angle = Math.atan2(p.loc.y - this.loc.y, p.loc.x - this.loc.x);
-      //let facing = Math.atan2(this.dy, this.dx);
-      //let diff = Math.abs(angle - facing);
-      //if (diff < Math.PI / 4) {
-      //  scores[players.indexOf(p)] += 1;
-      //}
-      // players under pressure have a lower chance of being passed to
-      //let pressure = p.calculate_pressure(opp);
-      //scores[players.indexOf(p)] -= pressure;
-      // players in a threatening position have a higher chance of being passed to
-      let threat = p.calculate_threat(team);
-      scores[players.indexOf(p)] += threat;
-
-      // sort scores
-      
-
+    // preferred pass distance, adjusted by team/player passing tactics
+    let preferred_distance = 15;
+    if (
+      team.tactics.includes("pass_very_short" as TeamInstruction) ||
+      team.tactics.includes("pass_short" as TeamInstruction)
+    ) {
+      preferred_distance *= 0.6;
     }
-
-    /*scores.sort((a, b) => {
-      return b - a;
-    });*/
-    //sort descending
-
-    // randomly choose player
-    // use decision making attribute
-    // use team tactics
-    // use player instructions
-
-    let decisions = this.attributes.get_attr("decisions");
-    if (decisions == undefined) {
-      decisions = 25;
+    if (team.tactics.includes("pass_long" as TeamInstruction)) {
+      preferred_distance *= 1.6;
     }
+    if (this.instructions.includes("shorter_passes" as PlayerInstruction)) {
+      preferred_distance *= 0.75;
+    }
+    // wide enough that realistic progressive/long passes stay competitive
+    // instead of being swamped by a handful of very close teammates
+    let std_dev = preferred_distance * 1.3;
 
-    // lower decisions means more deviation
-    // maximum randomness = 0.5
-    // minimum randomness = 0.1
-    //let randomness = 0.5 - (decisions / 100) * 0.4;
-    //let index = Math.floor(Math.random() * randomness * 10);
+    let attacking_goal: Coords = {
+      x: team.attacking_direction === "left" ? 0 : this.venue.length,
+      y: this.venue.width / 2,
+      z: 0,
+    };
+    let self_value = threat_value(this.loc, attacking_goal);
+
+    let scores = players.map((p) => {
+      // prefer passes close to the team/player's preferred distance
+      let d = dist(this.loc, p.loc);
+      let distance_score = Math.exp(
+        -0.5 * Math.pow((d - preferred_distance) / std_dev, 2)
+      );
+
+      // prefer teammates with more space from opponents
+      let openness_score = 1 / (1 + p.calculate_pressure(opp));
+
+      // prefer teammates in a genuinely more dangerous position, not just
+      // teammates who happen to be marginally further forward — otherwise
+      // the ball can circulate indefinitely without ever threatening goal
+      let value_score = threat_value(p.loc, attacking_goal) - self_value;
+
+      // reward switching the play to an open teammate on the other side of
+      // the pitch, a classic creative/sideways pass
+      let switch_score =
+        (Math.abs(p.loc.y - this.loc.y) / this.venue.width) * openness_score;
+
+      // reward finding a teammate who's currently making a forward run
+      let run_score = p.run_ticks_remaining > 0 ? 1 : 0;
+
+      // an open receiver isn't a safe pass if an opponent is standing in
+      // the direct line the ball has to travel to reach them
+      let risk_score = interception_risk(this.loc, p.loc, opp.playersOnPitch);
+
+      return (
+        distance_score * 0.6 +
+        openness_score * 2 +
+        value_score * 3 +
+        switch_score * 1.2 +
+        run_score * 1.5 -
+        risk_score * 3
+      );
+    });
 
     // get player with highest score
     let index = scores.indexOf(Math.max(...scores));
@@ -751,18 +1081,7 @@ export class PlayerOnPitch extends Player {
   }
 
   calculate_pressure(opp: Team) {
-    let opponents = opp.playersOnPitch;
-    let pressure = 0;
-    opponents.forEach((player) => {
-      let d = dist(this.loc, player.loc);
-      if (d < 10) {
-        if (d == 0 ) {
-          d += 0.1;
-        }
-        pressure += 1 / (d * d);
-      }
-    });
-    return pressure;
+    return pressure_at(this.loc, opp.playersOnPitch);
   }
 
   passive_movement() {
@@ -795,56 +1114,6 @@ export class PlayerOnPitch extends Player {
     };
   }
 
-  calculate_threat(team: Team) {
-    // distance to goal
-    let direction = team.attacking_direction;
-    let left: Coords = {
-      x: 0,
-      y: this.venue.width / 2,
-      z: 0,
-    };
-    let right: Coords = {
-      x: this.venue.length,
-      y: this.venue.width / 2,
-      z: 0,
-    };
-
-    if (direction == "left") {
-      //left side goal
-      let d = dist(this.loc, left);
-      return 1 / (d);
-    } else {
-      //right side goal
-      let d = dist(this.loc, right);
-      return 1 / (d);
-    }
-  }
-
-  threat_at_position(team:Team, loc:Coords) {
-    // distance to goal
-    let direction = team.attacking_direction;
-    let left: Coords = {
-      x: 0,
-      y: this.venue.width / 2,
-      z: 0,
-    };
-    let right: Coords = {
-      x: this.venue.length,
-      y: this.venue.width / 2,
-      z: 0,
-    };
-
-    if (direction == "left") {
-      //left side goal
-      let d = dist(loc, left);
-      return 1 / (d * d);
-    } else {
-      //right side goal
-      let d = dist(loc, right);
-      return 1 / (d * d);
-    }
-  }
-
   initialize() {
     this.target_speed = 0;
     this.target_loc =  (
@@ -856,6 +1125,8 @@ export class PlayerOnPitch extends Player {
     this.dz = 0;
 
     this.instructions = [];
+    this.run_ticks_remaining = 0;
+    this.dribble_commit_ticks = 0;
   }
 }
 
@@ -940,14 +1211,14 @@ export class Match {
   _home: Team;
   _away: Team;
   _date_time: Date;
-  background: OffscreenCanvas;
-  backgroundCtx: ImageBitmapRenderingContext;
-  bitmap: ImageBitmap;
-  foreground: HTMLCanvasElement | null;
   playersOnPitch: PlayerOnPitch[];
   stat:Stat;
   ball_bounce:boolean;
   ball_last_touch:Team|null;
+  gk_holding: PlayerOnPitch | null;
+  gk_hold_ticks: number;
+  last_passer: PlayerOnPitch | null;
+  ball_is_shot: boolean;
 
   set home(home: Team) {
     this._home = home;
@@ -979,6 +1250,39 @@ export class Match {
 
   record(stat:string, player:PlayerOnPitch) {
     this.stat.record(stat,player);
+  }
+
+  // team-level stat totals, summed across each player's individual
+  // record — the public way to read match results out of the engine
+  // (headless or otherwise) without reaching into Stat's internals
+  team_totals(team: Team) {
+    let totals = {
+      shots: 0,
+      shots_on_target: 0,
+      passes_attempted: 0,
+      passes_completed: 0,
+      saves: 0,
+    };
+    for (let p of team.playersOnPitch) {
+      let s = this.stat.player_stats._stats.get(p);
+      if (s) {
+        totals.shots += s.shots;
+        totals.shots_on_target += s.shots_on_target;
+        totals.passes_attempted += s.passes_attempted;
+        totals.passes_completed += s.passes_completed;
+        totals.saves += s.saves;
+      }
+    }
+    return totals;
+  }
+
+  get_summary() {
+    return {
+      home_goals: this.home_goals,
+      away_goals: this.away_goals,
+      home: this.team_totals(this.home),
+      away: this.team_totals(this.away),
+    };
   }
 
   initialize(rules: Map<string, boolean>) {
@@ -1021,6 +1325,10 @@ export class Match {
     this.ball_dy = 0 / 60;
     this.ball_dz = 0;
     this.ball_bounce = false;
+    this.gk_holding = null;
+    this.gk_hold_ticks = 0;
+    this.last_passer = null;
+    this.ball_is_shot = false;
 
     this.ball_target = {
       x: this.venue.dimensions.kickoff_spot.x,
@@ -1041,15 +1349,20 @@ export class Match {
 
     this.half = 1;
 
+    // this.time never resets between periods (it's the running match
+    // clock), so these thresholds have to be cumulative — they previously
+    // weren't, which meant the second half's condition (time < 2700) was
+    // already false the instant the first half ended (time == 2700), and
+    // the match silently stopped at half time every single game.
     this.max_1st_half_time = 45.0 * 60.0;
-    this.max_2nd_half_time = 45.0 * 60.0;
+    this.max_2nd_half_time = this.max_1st_half_time + 45.0 * 60.0;
 
     if (rules.get("extra_time") == true) {
       this.possible_extra_time = true;
       this.is_extra_time = false;
       this.extra_time_half = 1;
-      this.max_1st_half_extra_time = 15.0 * 60.0;
-      this.max_2nd_half_extra_time = 15.0 * 60.0;
+      this.max_1st_half_extra_time = this.max_2nd_half_time + 15.0 * 60.0;
+      this.max_2nd_half_extra_time = this.max_1st_half_extra_time + 15.0 * 60.0;
     } else {
       this.possible_extra_time = false;
       this.is_extra_time = false;
@@ -1088,38 +1401,9 @@ export class Match {
     });
 
     this.stat = new Stat(this);
-
-    this.background = new OffscreenCanvas(900, 900);
-    draw_pitch(this.background);
-    this.bitmap = this.background.transferToImageBitmap();
-    let pitch = document.querySelector("#pitch") as HTMLCanvasElement;
-    pitch.height = this.background.height;
-    pitch.width = this.background.width;
-    this.backgroundCtx = pitch.getContext(
-      "bitmaprenderer"
-    ) as ImageBitmapRenderingContext;
-    this.backgroundCtx.transferFromImageBitmap(this.bitmap);
-
-    this.foreground = document.createElement("canvas");
-    this.foreground.id = "foreground";
-    this.foreground.width = 900;
-    this.foreground.height = this.background.height;
-    pitch.insertAdjacentElement("afterend", this.foreground);
-
-    this.update_clock();
   }
 
-  update_clock() {
-    
-    const clock: HTMLDivElement | null = document.querySelector("#clock");
-    if (clock) {
-      clock.innerHTML = this.fmt_seconds(this.time);
-      setInterval(() => {
-        clock.innerHTML = this.fmt_seconds(this.time);
-      }, 1000);
-    }
-  }
-
+  // pure formatting, no DOM — used by MatchRenderer to display the clock
   fmt_seconds(seconds: number) {
     const minutes = Math.floor(seconds / 60);
     const secs = Math.floor(seconds % 60);
@@ -1141,12 +1425,72 @@ export class Match {
   }
 
   // update ball possession
+  // there was no way for a defender to actually win the ball off a
+  // carrier — proximity alone never cost the attacking side anything, so
+  // a player one-on-one with the keeper could recycle possession
+  // indefinitely with zero risk, since nothing was closing them down in
+  // a way that could actually take the ball away. A defender who
+  // genuinely closes the gap now gets a real, attribute-based chance to
+  // dispossess them.
+  attempt_tackles() {
+    if (this.gk_holding || !this.player_possession) {
+      return;
+    }
+    let carrier = this.player_possession;
+    let opp_team = carrier.team == this.home ? this.away : this.home;
+    // goalkeepers don't tackle in open play — but that means we need the
+    // closest *outfield* defender specifically, not "the closest
+    // opponent, bail if it's the keeper": in a genuine breakaway the
+    // keeper legitimately *is* the closest opponent (nobody else has
+    // caught up), so bailing out there disabled tackling in exactly the
+    // one-on-one scenario it most needs to cover
+    let outfield_opponents = opp_team.playersOnPitch.filter(
+      (p) => p.position.name != "Goalkeeper"
+    );
+    let closest_opp = outfield_opponents.reduce((a, b) =>
+      dist(a.loc, carrier.loc) < dist(b.loc, carrier.loc) ? a : b
+    );
+    let d = dist(closest_opp.loc, carrier.loc);
+    let tackle_range = 1.5;
+    if (d > tackle_range) {
+      return;
+    }
+
+    let tackling = closest_opp.attributes.get_attr("tackling");
+    let ball_control = (carrier.attributes.get_attr("dribbling") + carrier.attributes.get_attr("balance")) / 2;
+    // roughly: an average defender who closes down an average dribbler
+    // wins the ball a bit under a third of the time they get close
+    // enough to actually challenge — real risk, not a coin flip
+    let tackle_chance = Math.min(0.6, Math.max(0.05, 0.28 + ((tackling - ball_control) / 100) * 0.5));
+    if (Math.random() < tackle_chance) {
+      this.player_possession = null;
+      this.set_possession(null);
+      this.ball_last_touch = closest_opp.team;
+      this.ball_is_shot = false;
+      carrier.dribble_commit_ticks = 0;
+      // knock it loose a short distance rather than teleporting
+      // possession outright — both sides get a fair scramble for it
+      let away_x = this.ball_pos.x - closest_opp.loc.x || 0.01;
+      let away_y = this.ball_pos.y - closest_opp.loc.y || 0.01;
+      let norm = Math.sqrt(away_x * away_x + away_y * away_y) || 1;
+      this.ball_dx = (away_x / norm) * 2 / 60;
+      this.ball_dy = (away_y / norm) * 2 / 60;
+    }
+  }
+
   update_possession() {
     let closest = this.closest_to_ball();
-        
-    // if the ball is more than 2m away from any players,
-    // possession is null
-    if (dist(closest[0].loc, this.ball_pos) > 2 && dist(closest[1].loc, this.ball_pos) > 2 || this.ball_pos.z > 2) {
+
+    // hysteresis: once a player has the ball, require it to drift further
+    // away before calling it loose, so it doesn't flicker in and out of
+    // possession as it rolls right at the boundary
+    let release_range = this.player_possession != null ? 3 : 2;
+
+    if (
+      (dist(closest[0].loc, this.ball_pos) > release_range &&
+        dist(closest[1].loc, this.ball_pos) > release_range) ||
+      this.ball_pos.z > 2
+    ) {
       this.player_possession = null;
       this.set_possession(null);
     }
@@ -1154,8 +1498,19 @@ export class Match {
       closest.sort((a, b) => {
         return dist(a.loc, this.ball_pos) - dist(b.loc, this.ball_pos);
       });
-      this.player_possession = closest[0];
-      this.set_possession(closest[0].team);
+      let new_carrier = closest[0];
+
+      // if the ball was in flight from a pass and the intended receiver is
+      // the one gaining control, credit the passer with a completion —
+      // checked here, before decide_action resets receive_pass for this
+      // cycle, since that's the one moment both flags are still valid
+      if (this.last_passer && new_carrier.receive_pass && new_carrier.team == this.last_passer.team) {
+        this.record("passes_completed", this.last_passer);
+      }
+      this.last_passer = null;
+
+      this.player_possession = new_carrier;
+      this.set_possession(new_carrier.team);
 
     }
   }
@@ -1188,9 +1543,10 @@ export class Match {
   }
 
   collision_detection() {
-    // two players can't occupy the same space
+    // two players can't occupy the same space (kept tight enough that two
+    // players genuinely contesting a loose ball can still both reach it)
 
-    let radius = 0.8;
+    let radius = 0.5;
 
     for (let p of this.playersOnPitch) {
       for (let q of this.playersOnPitch
@@ -1206,6 +1562,29 @@ export class Match {
           q.loc.x += (q.loc.x - p.loc.x) /8;
           q.loc.y += (q.loc.y - p.loc.y) /8;
 
+        }
+      }
+    }
+
+    // opponents can't crowd the goalkeeper — real players naturally give
+    // keepers room, especially near their own goal. Without this, a
+    // striker could simply stand right in front of (or right next to)
+    // the keeper, turning every distribution into a free interception,
+    // and there was nothing making an interception-aware throw target
+    // actually solve that if the keeper had nowhere else safe to look
+    let gk_exclusion_radius = 6;
+    for (let team of [this.home, this.away]) {
+      let gk = team.playersOnPitch.find((p) => p.position.name == "Goalkeeper");
+      if (!gk) {
+        continue;
+      }
+      let opp_team = team == this.home ? this.away : this.home;
+      for (let p of opp_team.playersOnPitch) {
+        let d = dist(p.loc, gk.loc);
+        if (d < gk_exclusion_radius && d > 0) {
+          let push = gk_exclusion_radius - d;
+          p.loc.x += ((p.loc.x - gk.loc.x) / d) * push;
+          p.loc.y += ((p.loc.y - gk.loc.y) / d) * push;
         }
       }
     }
@@ -1239,54 +1618,75 @@ export class Match {
       }
     }
 
-    // check if the ball crosses the touch line
-    if (this.ball_pos.x < 0) {
-      // check if it crosses the goal line
-      if (this.ball_pos.y > this.venue.width/2 - 7.32/2 && this.ball_pos.y < this.venue.width/2 + 7.32/2) {
+    // goalkeeper saves: a keeper can gather or parry the ball within
+    // diving range if it's heading back toward their own goal
+    for (let team of [this.home, this.away]) {
+      let gk = team.playersOnPitch.find((p) => p.position.name == "Goalkeeper");
+      if (!gk) {
+        continue;
+      }
+      let d = dist(gk.loc, this.ball_pos);
+      let dive_radius = 2.2;
+      if (d < dive_radius && this.ball_pos.z < 2.4) {
+        let own_goal_x = team.attacking_direction == "left" ? this.venue.length : 0;
+        let heading_toward_own_goal =
+          (own_goal_x == 0 && this.ball_dx < 0) ||
+          (own_goal_x != 0 && this.ball_dx > 0);
+        if (heading_toward_own_goal) {
+          let reactions = gk.attributes.get_attr("reactions");
+          let agility = gk.attributes.get_attr("agility");
+          let handling = gk.attributes.get_attr("handling");
+          let one_on_ones = gk.attributes.get_attr("one_on_ones");
+          let positioning = gk.attributes.get_attr("positioning");
+          let ability = (reactions + agility + handling + one_on_ones + positioning) / 5;
+          let reach = 1 - d / dive_radius;
+          let save_chance = Math.min(0.95, (ability / 100) * 0.6 + reach * 0.35);
+          if (Math.random() < save_chance) {
+            this.ball_pos = { x: gk.loc.x, y: gk.loc.y, z: 0 };
+            this.ball_dx = 0;
+            this.ball_dy = 0;
+            this.ball_dz = 0;
+            this.set_possession(team);
+            this.player_possession = gk;
+            // the keeper can use their hands and hold the ball — the
+            // opponent can't challenge for it while they're holding it
+            this.gk_holding = gk;
+            this.gk_hold_ticks = 60 + Math.floor(Math.random() * 60);
+            this.record("saves", gk);
+          }
+        }
+      }
+    }
+
+    // check if the ball crosses either goal line
+    if (this.ball_pos.x < 0 || this.ball_pos.x > this.venue.length) {
+      let exit_side: "left" | "right" = this.ball_pos.x < 0 ? "left" : "right";
+      // whichever team attacks the *other* end defends the goal on this side
+      let defending_team =
+        this.home.attacking_direction == (exit_side == "left" ? "right" : "left")
+          ? this.home
+          : this.away;
+      let attacking_team = defending_team == this.home ? this.away : this.home;
+
+      if (this.ball_is_shot && this.ball_pos.y > this.venue.width/2 - 7.32/2 && this.ball_pos.y < this.venue.width/2 + 7.32/2) {
         // goal
-        let team_scored:Team;
-        if (this.home.attacking_direction=="left") {
-          team_scored = this.home;
-        }
-        else {
-          team_scored = this.away;
-        }
-        this.goal(team_scored);
+        this.goal(attacking_team);
+      }
+      else if (this.ball_last_touch == defending_team) {
+        // corner for the attacking team
+        this.corner(attacking_team, this.ball_pos.y > this.venue.width/2 ? "right" : "left");
       }
       else {
-        if (this.home.attacking_direction=="left") {
-          if (this.ball_last_touch == this.away) {
-            // corner
-            // side of the pitch
-            if (this.ball_pos.y > this.venue.width/2) {
-              this.corner(this.home, "right");
-            }
-            else {
-              this.corner(this.home, "left");
-            }
-          }
-          else {
-            // goal kick
-            this.goal_kick(this.away);
-          }
-        }
-        else {
-          if (this.ball_last_touch == this.home) {
-            // corner
-            // side of the pitch
-            if (this.ball_pos.y > this.venue.width/2) {
-              this.corner(this.away, "right");
-            }
-            else {
-              this.corner(this.away, "left");
-            }
-          }
-          else {
-            // goal kick
-            this.goal_kick(this.home);
-          }
-        }
+        // goal kick for the defending team
+        this.goal_kick(defending_team);
       }
+    }
+    // check if the ball crosses either touch line
+    else if (this.ball_pos.y < 0 || this.ball_pos.y > this.venue.width) {
+      // whoever didn't put it out of play takes the throw-in
+      let team = this.ball_last_touch == this.home ? this.away : this.home;
+      let x = Math.min(Math.max(this.ball_pos.x, 0), this.venue.length);
+      this.throw_in(team, x);
     }
   }
 
@@ -1306,61 +1706,191 @@ export class Match {
     this.do_kickoff();
   }
 
+  // once the hold timer runs out, the keeper throws it to an open nearby
+  // teammate if there's a safe one, otherwise punts it long downfield
+  gk_distribute(gk: PlayerOnPitch) {
+    let team = gk.team;
+    let opp = team == this.home ? this.away : this.home;
+    this.ball_is_shot = false;
+
+    // pressure at the receiver's own spot isn't enough — an opponent can
+    // be standing in the direct line between the keeper and an otherwise
+    // unmarked teammate (a striker camped right in front of goal is the
+    // classic case), so the throw needs to check the lane too, the same
+    // way outfield passing does
+    let candidates = team.playersOnPitch.filter(
+      (p) => p != gk && dist(gk.loc, p.loc) < 30
+    );
+    let best: PlayerOnPitch | null = null;
+    let best_risk = Infinity;
+    for (let p of candidates) {
+      let pressure = p.calculate_pressure(opp);
+      let lane_risk = interception_risk(gk.loc, p.loc, opp.playersOnPitch);
+      let risk = pressure + lane_risk * 2;
+      if (risk < best_risk) {
+        best_risk = risk;
+        best = p;
+      }
+    }
+
+    if (best && best_risk < 1.5) {
+      // throw it out to them
+      let d = dist(gk.loc, best.loc);
+      let speed = Math.min(18, d * 1.5);
+      this.ball_dx = ((best.loc.x - gk.loc.x) / d) * speed / 60;
+      this.ball_dy = ((best.loc.y - gk.loc.y) / d) * speed / 60;
+      this.ball_dz = 0;
+      best.receive_pass = true;
+    } else {
+      // punt it long downfield
+      let attacking_x = team.attacking_direction == "left" ? 0 : this.venue.length;
+      let target_x = gk.loc.x + (attacking_x - gk.loc.x) * 0.6;
+      let target_y = this.venue.width / 2 + rand_in_range(-15, 15);
+      let d = dist(gk.loc, { x: target_x, y: target_y, z: 0 });
+      let speed = 22;
+      this.ball_dx = ((target_x - gk.loc.x) / d) * speed / 60;
+      this.ball_dy = ((target_y - gk.loc.y) / d) * speed / 60;
+      this.ball_dz = 5 / 60;
+    }
+
+    this.record("passes_attempted", gk);
+    this.gk_holding = null;
+    this.player_possession = null;
+    this.set_possession(null);
+  }
+
+  getClosestPlayer(team: Team, point: Coords) {
+    let players = team.playersOnPitch;
+    let closest = players[0];
+    let min_dist = dist(closest.loc, point);
+    for (let p of players) {
+      let d = dist(p.loc, point);
+      if (d < min_dist) {
+        min_dist = d;
+        closest = p;
+      }
+    }
+    return closest;
+  }
+
+  // "cut" straight to players being organized for a restart, rather than
+  // freezing all 22 of them exactly where the stoppage happened
+  prepare_restart(teamInPossession: Team) {
+    for (let p of this.playersOnPitch) {
+      p.dx = 0;
+      p.dy = 0;
+      p.loc = p.calculate_optimal_position(teamInPossession);
+    }
+  }
+
+  corner(team: Team, side: "left" | "right") {
+    // team is the attacking team taking the corner
+    let x = team.attacking_direction == "left" ? 0 : this.venue.length;
+    let y = side == "left" ? 0 : this.venue.width;
+    let opp = team == this.home ? this.away : this.home;
+
+    this.ball_pos = { x, y, z: 0 };
+    this.ball_dx = 0;
+    this.ball_dy = 0;
+    this.ball_dz = 0;
+    this.set_possession(team);
+    this.prepare_restart(team);
+
+    let taker = this.getClosestPlayer(team, { x, y, z: 0 });
+    taker.loc = { x, y, z: 0 };
+    this.player_possession = taker;
+    taker.pass(team, opp);
+  }
+
+  goal_kick(team: Team) {
+    // team is the defending team taking the goal kick
+    let x = team.attacking_direction == "left" ? this.venue.length - 5.5 : 5.5;
+    let y = this.venue.width / 2;
+    let opp = team == this.home ? this.away : this.home;
+
+    this.ball_pos = { x, y, z: 0 };
+    this.ball_dx = 0;
+    this.ball_dy = 0;
+    this.ball_dz = 0;
+    this.set_possession(team);
+    this.prepare_restart(team);
+
+    let taker = this.getClosestPlayer(team, { x, y, z: 0 });
+    taker.loc = { x, y, z: 0 };
+    this.player_possession = taker;
+    taker.pass(team, opp);
+  }
+
+  throw_in(team: Team, x: number) {
+    let y = this.ball_pos.y < 0 ? 0 : this.venue.width;
+    let opp = team == this.home ? this.away : this.home;
+
+    this.ball_pos = { x, y, z: 0 };
+    this.ball_dx = 0;
+    this.ball_dy = 0;
+    this.ball_dz = 0;
+    this.set_possession(team);
+    this.prepare_restart(team);
+
+    let taker = this.getClosestPlayer(team, { x, y, z: 0 });
+    taker.loc = { x, y: y == 0 ? 1 : this.venue.width - 1, z: 0 };
+    this.ball_pos.y = taker.loc.y;
+    this.player_possession = taker;
+    taker.pass(team, opp);
+  }
+
   move_ball() {
     this.ball_pos.x += this.ball_dx;
     this.ball_pos.y += this.ball_dy;
     this.ball_pos.z += this.ball_dz;
 
-    // calculate decelration
-    // mass = 0.43 kg
-    // friction coefficient = 0.03
-    // f_friction = 0.03 * 0.43 kg * 9.81 m/s/s = 0.01265 kg m/s/s
-    // f_drag = 0.5 * 0.03 * pi*(0.11m)^2 * 1.2 kg/m^3 * velocity^2
-    // velocity = dx * 60 + dy * 60 + dz * 60 (m/s)
-    // f_total = f_friction + f_drag
-    // a = f_total / mass
+    // ball_dx/dy/dz are stored as per-tick displacement (v * dt, dt = 1/60s),
+    // so recover true velocity in m/s before using it in the physics below —
+    // using the raw per-tick values directly here made drag ~3600x too weak
+    let vx = this.ball_dx * 60;
+    let vy = this.ball_dy * 60;
+    let vz = this.ball_dz * 60;
 
-    let f_friction = 0.01265;
+    // mass = 0.43 kg, rolling friction coefficient ~0.3 on grass
+    let mass = 0.43;
+    let f_friction = this.ball_pos.z > 0 ? 0 : 0.3 * mass * 9.81;
 
-    let f_drag_x = 0.5 * 0.03 * Math.PI * 0.11 * 0.11 * 1.2 * this.ball_dx*this.ball_dx;
-    let f_drag_y = 0.5 * 0.03 * Math.PI * 0.11 * 0.11 * 1.2 * this.ball_dy*this.ball_dy;
-    let f_drag_z = 0.5 * 0.03 * Math.PI * 0.11 * 0.11 * 1.2 * this.ball_dz*this.ball_dz;
-    if (this.ball_pos.z > 0) {
-      f_friction = 0;
-    }
+    let f_drag_x = 0.5 * 0.25 * Math.PI * 0.11 * 0.11 * 1.2 * vx * vx;
+    let f_drag_y = 0.5 * 0.25 * Math.PI * 0.11 * 0.11 * 1.2 * vy * vy;
+    let f_drag_z = 0.5 * 0.25 * Math.PI * 0.11 * 0.11 * 1.2 * vz * vz;
+
     let f_total_x = f_friction + f_drag_x;
     let f_total_y = f_friction + f_drag_y;
     let f_total_z = f_drag_z;
-    let a_x = f_total_x / 0.43;
-    let a_y = f_total_y / 0.43;
-    let a_z = (9.81) - f_total_z / 0.43;
+    let a_x = f_total_x / mass;
+    let a_y = f_total_y / mass;
+    let a_z = 9.81 - f_total_z / mass;
 
-    // calculate new velocity
-    // v = u + at
-    // u = v - at
-    // v = 0
-    // t = 1/60
+    // v_new = v_old - a*dt, and ball_dx stores v*dt (not v), so the
+    // per-tick decrement is a*dt^2, not a*dt (dt = 1/60s)
+    let dt2 = 1 / 3600;
 
-    //apply a to dx, dy, dz
     if (this.ball_dx > 0) {
-      this.ball_dx -= a_x / 60;
+      this.ball_dx = Math.max(0, this.ball_dx - a_x * dt2);
     } else if (this.ball_dx < 0) {
-      this.ball_dx += a_x / 60;
+      this.ball_dx = Math.min(0, this.ball_dx + a_x * dt2);
     }
     if (this.ball_dy > 0) {
-      this.ball_dy -= a_y / 60;
+      this.ball_dy = Math.max(0, this.ball_dy - a_y * dt2);
     } else if (this.ball_dy < 0) {
-      this.ball_dy += a_y / 60;
+      this.ball_dy = Math.min(0, this.ball_dy + a_y * dt2);
     }
 
-    if (this.ball_dz > 0) {
-      this.ball_dz -= a_z / 60;
-    } else if (this.ball_dz <= 0) {
-      // check if need to bounce
-      if (this.ball_pos.z < .16) {
-        this.ball_pos.z = 0;
-        this.ball_dz = -this.ball_dz;
-      }
+    // gravity has to keep pulling the ball down for the whole time it's
+    // airborne, not just while it's still rising — otherwise it hangs at
+    // the top of its arc and barely comes back down
+    if (this.ball_pos.z > 0 || this.ball_dz > 0) {
+      this.ball_dz -= a_z * dt2;
+    }
+    if (this.ball_dz <= 0 && this.ball_pos.z < .16) {
+      // bounce, losing some energy each time rather than forever
+      this.ball_pos.z = 0;
+      this.ball_dz = -this.ball_dz * 0.5;
     }
 
     
@@ -1388,116 +1918,59 @@ export class Match {
     });
   }
 
-  draw_agents() {
-    let ctx = this.foreground?.getContext("2d");
-    if (this.foreground) {
-      ctx?.clearRect(0, 0, this.foreground.width, this.foreground.height);
-      this.draw_ball();
-      this.draw_players();
-    }
-  }
-
-  draw_ball() {
-    requestAnimationFrame(() => {
-      let ctx = this.foreground?.getContext("2d");
-      if (this.foreground) {
-
-        const pitchOffset = 50;
-        if (ctx) {
-          let length = this.background.width - 2 * pitchOffset;
-          let width = this.background.height - 2 * pitchOffset;
-          if (ctx) {
-            let x = (this.ball_pos.x / this.venue.length) * length + pitchOffset;
-            let y = (this.ball_pos.y / this.venue.width) * width + pitchOffset;
-
-            // if z is larger than the radius should be larger
-            let radius = 3.4;
-            if (this.ball_pos.z > 0) {
-              radius += this.ball_pos.z*2;
-            }
-
-            ctx.fillStyle = "black";
-            ctx.beginPath();
-            ctx.arc(x, y, radius, 0, 2 * Math.PI);
-            ctx.fill();
-
-            ctx.fillStyle = "white";
-            ctx.beginPath();
-            ctx.arc(x, y, radius-1, 0, 2 * Math.PI);
-            ctx.fill();
-
-            let target_x = (this.ball_target.x/this.venue.length)*length + pitchOffset;
-            let target_y = (this.ball_target.y/this.venue.width)*width + pitchOffset;
-
-            ctx.strokeStyle = "red";
-            ctx.beginPath();
-            ctx.arc(target_x, target_y, radius, 0, 2 * Math.PI);
-            ctx.stroke();
-          }
-        }
-      }
-    });
-  }
-
-  draw_players() {
-    requestAnimationFrame(() => {
-      let ctx = this.foreground?.getContext("2d");
-      if (this.foreground) {
-        
-        const pitchOffset = 50;
-        let length = this.background.width - 2 * pitchOffset;
-        let width = this.background.height - 2 * pitchOffset;
-        this.home.playersOnPitch.forEach((player) => {
-          let x = (player.loc.x / this.venue.length) * length + pitchOffset;
-          let y = (player.loc.y / this.venue.width) * width + pitchOffset;
-          if (ctx) {
-            ctx.fillStyle = "black";
-            ctx.beginPath();
-            ctx.arc(x, y, 4.4, 0, 2 * Math.PI);
-            ctx.fill();
-
-            ctx.fillStyle = "white";
-            ctx.beginPath();
-            ctx.arc(x, y, 3.4, 0, 2 * Math.PI);
-            ctx.fill();
-          }
-        });
-        this.away.playersOnPitch.forEach((player) => {
-          let x = (player.loc.x / this.venue.length) * length + pitchOffset;
-          let y = (player.loc.y / this.venue.width) * width + pitchOffset;
-          if (ctx) {
-            ctx.fillStyle = "white";
-            ctx.beginPath();
-            ctx.arc(x, y, 5, 0, 2 * Math.PI);
-            ctx.fill();
-
-            ctx.fillStyle = "black";
-            ctx.beginPath();
-            ctx.arc(x, y, 4, 0, 2 * Math.PI);
-            ctx.fill();
-          }
-        });
-      }
-    });
-  }
 
   tick() {
-    
+
     this.time += 1 / 60;
     this.ticks += 1;
-    if (this.ticks == 10) {
+
+    if (this.gk_holding) {
+      // the ball stays in the keeper's hands, untouchable, until they
+      // release it — no physics, no possession contest, and no leftover
+      // dive momentum carrying them around while they're holding it
+      this.gk_holding.dx = 0;
+      this.gk_holding.dy = 0;
+      this.ball_pos = { x: this.gk_holding.loc.x, y: this.gk_holding.loc.y, z: 0 };
+      this.gk_hold_ticks--;
+      if (this.gk_hold_ticks <= 0) {
+        this.gk_distribute(this.gk_holding);
+      }
+    } else if (this.ticks == 10) {
+      this.attempt_tackles();
       this.update_possession();
+    }
+
+    if (this.ticks == 10) {
       // human reaction time is roughly
       // a sixth of a second so only
       // update every 10 ticks
       this.ticks = 0;
       this.players_decide();
     }
-    this.draw_agents();
     this.collision_detection();
     this.move_players();
-    this.move_ball();
-  
+    if (this.gk_holding) {
+      // handled above
+    } else if (this.player_possession) {
+      // the ball stays at the carrier's feet under close control — the
+      // rolling/flight physics only take over once it's actually been
+      // kicked (attempt_pass/attempt_shot clear player_possession the
+      // instant that happens) or the ball is genuinely loose. Without
+      // this, a "dribbling" player just runs away from a ball that stays
+      // put, loses possession within a fraction of a second, and never
+      // visibly carries it anywhere.
+      this.ball_pos = {
+        x: this.player_possession.loc.x,
+        y: this.player_possession.loc.y,
+        z: 0,
+      };
+      this.ball_dx = 0;
+      this.ball_dy = 0;
+      this.ball_dz = 0;
+    } else {
+      this.move_ball();
+    }
+
   }
 
   getKickoffPlayer(team: Team) {
@@ -1621,11 +2094,9 @@ export class Match {
     }
   }
 
-  do_kickoff(team?: number, half?: boolean) {
+  do_kickoff(half?: boolean) {
     const rand = Math.random();
-    if (team==null) {
-      let team = 0;
-    }
+    let team = 0;
     if (!half) {
       if (rand < 0.5) {
         this.set_possession(this.home);
@@ -1646,6 +2117,17 @@ export class Match {
     }
     let t = team == 0 ? this.home : this.away;
     let o = team == 0 ? this.away : this.home;
+
+    this.ball_pos = {
+      x: this.venue.dimensions.kickoff_spot.x,
+      y: this.venue.dimensions.kickoff_spot.y,
+      z: 0,
+    };
+    this.ball_dx = 0;
+    this.ball_dy = 0;
+    this.ball_dz = 0;
+    this.prepare_restart(t);
+
     const p1 = this.getKickoffPlayer(t);
     p1.loc.x = this.venue.dimensions.kickoff_spot.x;
     if (p1.team.attacking_direction == "left") {
@@ -1655,94 +2137,83 @@ export class Match {
     }
     p1.loc.y = this.venue.dimensions.kickoff_spot.y;
     this.player_possession = p1;
-    //this.player_possession.pass(t, o);
-    this.ball_dx = 1;
-    this.ball_dy = 1;
-    this.ball_dz = 0;
+    this.player_possession.pass(t, o);
   }
 
-  async play() {
-    this.initialize(
-      new Map<string, boolean>([
-        ["extra_time", false],
-        ["penalties", false],
-      ])
-    );
-    while (this.half == 1 && this.time < this.max_1st_half_time) {
+  // advances the match by exactly one tick, handling kickoffs and
+  // half/extra-time transitions along the way. Returns false once the
+  // match is completely over. This is the single source of truth for
+  // match progression — both the headless simulate() loop and a paced,
+  // rendered loop (see index.ts) drive the match by calling this
+  // repeatedly, so there's exactly one implementation of "what happens
+  // next" instead of the same four-loop structure duplicated per caller.
+  tick_match(): boolean {
+    if (this.half == 1 && this.time < this.max_1st_half_time) {
       if (!this.started) {
         this.do_kickoff(false);
         this.started = true;
       }
-      let now = DateTime.now();
       this.tick();
-      if (DateTime.now().diff(now).milliseconds < 1000 / 60) {
-        await new Promise((resolve) =>
-          setTimeout(resolve, 1000 / 60 - DateTime.now().diff(now).milliseconds)
-        );
-      }
+      return true;
     }
-    this.half = 2;
-    this.started = false;
-    while (this.half == 2 && this.time < this.max_2nd_half_time) {
+    if (this.half == 1) {
+      this.half = 2;
+      this.started = false;
+      return true;
+    }
+    if (this.half == 2 && this.time < this.max_2nd_half_time) {
       if (!this.started) {
         this.do_kickoff(true);
         this.started = true;
       }
-      let now = DateTime.now();
       this.tick();
-      if (DateTime.now().diff(now).milliseconds < 1000 / 60) {
-        await new Promise((resolve) =>
-          setTimeout(resolve, 1000 / 60 - DateTime.now().diff(now).milliseconds)
-        );
-      }
+      return true;
     }
-    if (this.possible_extra_time) {
-      if (this.home_goals == this.away_goals) {
-        this.extra_time_half = 1;
+    if (this.possible_extra_time && this.home_goals == this.away_goals) {
+      if (!this.is_extra_time) {
         this.is_extra_time = true;
+        this.extra_time_half = 1;
         this.started = false;
-        while (
-          this.extra_time_half == 1 &&
-          this.time < this.max_1st_half_extra_time
-        ) {
-          if (!this.started) {
-            this.do_kickoff(false);
-            this.started = true;
-          }
-          let now = DateTime.now();
-          this.tick();
-          if (DateTime.now().diff(now).milliseconds < 1000 / 60) {
-            await new Promise((resolve) =>
-              setTimeout(
-                resolve,
-                1000 / 60 - DateTime.now().diff(now).milliseconds
-              )
-            );
-          }
+        return true;
+      }
+      if (this.extra_time_half == 1 && this.time < this.max_1st_half_extra_time) {
+        if (!this.started) {
+          this.do_kickoff(false);
+          this.started = true;
         }
+        this.tick();
+        return true;
+      }
+      if (this.extra_time_half == 1) {
         this.extra_time_half = 2;
         this.started = false;
-        while (
-          this.extra_time_half == 2 &&
-          this.time < this.max_2nd_half_extra_time
-        ) {
-          if (!this.started) {
-            this.do_kickoff(true);
-            this.started = true;
-          }
-          let now = DateTime.now();
-          this.tick();
-          if (DateTime.now().diff(now).milliseconds < 1000 / 60) {
-            await new Promise((resolve) =>
-              setTimeout(
-                resolve,
-                1000 / 60 - DateTime.now().diff(now).milliseconds
-              )
-            );
-          }
+        return true;
+      }
+      if (this.extra_time_half == 2 && this.time < this.max_2nd_half_extra_time) {
+        if (!this.started) {
+          this.do_kickoff(true);
+          this.started = true;
         }
+        this.tick();
+        return true;
       }
     }
+    return false;
+  }
+
+  // headless: runs the whole match to completion as fast as possible, no
+  // pacing, no rendering. This is what makes running many matches in bulk
+  // (to validate the engine's output distribution) actually practical —
+  // the old play() paced itself to wall-clock time, so a 90 sim-minute
+  // match took ~90 real minutes to compute.
+  simulate(
+    rules: Map<string, boolean> = new Map([
+      ["extra_time", false],
+      ["penalties", false],
+    ])
+  ) {
+    this.initialize(rules);
+    while (this.tick_match()) {}
   }
 }
 
@@ -1750,32 +2221,28 @@ export class Stat {
   player_stats:PlayerMatchStats;
 
   constructor (match:Match|SimMatch) {
-    let i = 0;
     this.player_stats = new PlayerMatchStats();
-    for (let _ of match.playersOnPitch) {
-      this.player_stats.push(i);
+    for (let p of match.playersOnPitch) {
+      this.player_stats.push(p);
     }
   }
   record(stat:string, type:Player|Team) {
     if (type instanceof Player) {
       // record player stat
-      this.player_stats.record(stat);
+      this.player_stats.record(type, stat);
 
     }
   }
 }
 
 class PlayerMatchStats {
-  _id: number;
-  _stats: Map<number, PlayerStats>;
+  _stats: Map<Player, PlayerStats>;
 
   constructor() {
-    this._id = 0;
     this._stats = new Map();
   }
-  push(id:number) {
-    this._id = id;
-    this._stats.set(id,{
+  push(player:Player) {
+    this._stats.set(player,{
       goals: 0,
       assists: 0,
       passes_attempted: 0,
@@ -1802,8 +2269,8 @@ class PlayerMatchStats {
     });
   }
 
-  record(stat:string) {
-    let s = this._stats.get(this._id);
+  record(player:Player, stat:string) {
+    let s = this._stats.get(player);
     if (s) {
       if (stat == "passes_attempted") {
         s.passes_attempted += 1;
@@ -1816,6 +2283,9 @@ class PlayerMatchStats {
       }
       if (stat == "shots_on_target") {
         s.shots_on_target += 1;
+      }
+      if (stat == "saves") {
+        s.saves += 1;
       }
 
     }

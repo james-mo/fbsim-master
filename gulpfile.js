@@ -8,28 +8,47 @@ var paths = {
   pages: ["src/*.html"],
 };
 
-var watchedBrowserify = watchify(
-  browserify({
+function newBundler() {
+  return browserify({
     basedir: ".",
     debug: true,
     entries: ["src/worker/index.ts"],
     cache: {},
     packageCache: {},
-  }).plugin(tsify)
-);
+  }).plugin(tsify);
+}
 
-gulp.task("copy-html", function () {
-  return gulp.src(paths.pages).pipe(gulp.dest("dist"));
-});
-
-function bundle() {
-  return watchedBrowserify
+function bundle(bundler) {
+  return bundler
     .bundle()
     .on("error", fancy_log)
     .pipe(source("bundle.js"))
     .pipe(gulp.dest("dist"));
 }
 
-gulp.task("default", gulp.series(gulp.parallel("copy-html"), bundle));
-watchedBrowserify.on("update", bundle);
-watchedBrowserify.on("log", fancy_log);
+gulp.task("copy-html", function () {
+  return gulp.src(paths.pages).pipe(gulp.dest("dist"));
+});
+
+// one-shot build: writes dist/bundle.js once and exits
+gulp.task(
+  "build",
+  gulp.series(gulp.parallel("copy-html"), function build() {
+    return bundle(newBundler());
+  })
+);
+
+// dev loop: rebuilds dist/bundle.js on every save, stays running
+gulp.task(
+  "watch",
+  gulp.series(gulp.parallel("copy-html"), function watch() {
+    var watched = watchify(newBundler());
+    watched.on("update", function () {
+      bundle(watched);
+    });
+    watched.on("log", fancy_log);
+    return bundle(watched);
+  })
+);
+
+gulp.task("default", gulp.series("watch"));
